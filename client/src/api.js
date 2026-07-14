@@ -178,6 +178,12 @@ export const api = {
       method: 'POST',
       admin: true
     }),
+  setQueueMode: (queueMode) =>
+    request('/api/admin/queue/mode', {
+      method: 'POST',
+      admin: true,
+      body: { queueMode }
+    }),
   resetLeaderboard: () =>
     request('/api/admin/leaderboard/reset', {
       method: 'POST',
@@ -232,6 +238,12 @@ export const api = {
     request('/api/admin/playback/history?limit=100', {
       admin: true
     }),
+  spotifyRequestLog: () => request('/api/admin/spotify/request-log', { admin: true }),
+  clearSpotifyRequestLog: () =>
+    request('/api/admin/spotify/request-log', {
+      method: 'DELETE',
+      admin: true
+    }),
   exportPlaybackHistory: ({ from, to } = {}) => {
     const query = new URLSearchParams();
     if (from) query.set('from', from);
@@ -257,13 +269,21 @@ export const api = {
       method: 'POST',
       body: { url }
     }),
-  playlistTracks: (playlistId, offset = 0, admin = false) =>
-    request(`/api/playlists/${playlistId}/tracks?offset=${offset}&limit=30`, { admin }),
+  playlistTracks: (playlistId, offset = 0, admin = false, refresh = false) =>
+    request(
+      `/api/playlists/${playlistId}/tracks?offset=${offset}&limit=30${refresh ? '&refresh=true' : ''}`,
+      { admin }
+    ),
   pinPlaylist: (url) =>
     request('/api/admin/pinned-playlists', {
       method: 'POST',
       admin: true,
       body: { url }
+    }),
+  refreshPinnedPlaylists: () =>
+    request('/api/admin/pinned-playlists/refresh', {
+      method: 'POST',
+      admin: true
     }),
   removePinned: (playlistId) =>
     request(`/api/admin/pinned-playlists/${playlistId}`, {
@@ -275,6 +295,12 @@ export const api = {
       method: 'POST',
       admin: true,
       body: { enabled }
+    }),
+  setPinnedGuestVisibility: (playlistId, visibleToGuests) =>
+    request(`/api/admin/pinned-playlists/${playlistId}/visibility`, {
+      method: 'POST',
+      admin: true,
+      body: { visibleToGuests }
     }),
   recommendations: (guestId) =>
     request(`/api/recommendations?guestId=${encodeURIComponent(guestId)}&limit=20`)

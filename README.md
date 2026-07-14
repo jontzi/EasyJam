@@ -61,7 +61,7 @@ OAuth settings:
 - TuneMyMusic CSV/TXT import in the guest view: Spotify IDs from CSV files are used directly, while `Artist - Track` rows from TXT files are resolved through Spotify Search.
 - Admin-pinned playlists displayed on the guest home page.
 - Recommendations based on the guest's own queue.
-- Round-robin queue construction from per-user queues.
+- Host-selectable queue construction: round-robin interleaving by guest or FIFO by request time.
 - Full Spotify playlist synchronization after every guest addition, removal, and admin reorder.
 - Drag-and-drop manual ordering and removal in the admin panel.
 - An admin guest list, activity within the last 90 seconds, and removal of individual guests or all guests. Removal clears a guest's requests but does not block them; they can rejoin with a valid invite. A separate block action prevents rejoining, and blocks can be removed from the admin panel.

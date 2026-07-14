@@ -19,6 +19,7 @@ export const partyState = {
   guests: new Map(),
   guestOrder: [],
   bannedGuests: new Map(),
+  queueMode: 'roundRobin',
   manualOrder: null,
   pinnedPlaylists: [],
   randomFallback: {
@@ -46,10 +47,15 @@ export const partyState = {
     autoStarted: false,
     lastSource: null,
     lastPlaylistUris: [],
+    lastPlaylistSnapshotId: null,
+    syncPending: false,
+    scheduledSyncAt: null,
     fallbackTracks: [],
     returnToEasyJamPending: false,
     pendingHandoff: null,
+    playlistRefreshPending: false,
     protectedPlaybackUri: null,
+    noActivePlaybackSince: null,
     playbackControlSuspended: false,
     // A host pause in Spotify must take precedence over automatic handoffs.
     manualPause: false
@@ -327,6 +333,7 @@ function hydrateLivePartyState(livePartyState) {
     });
   }
   partyState.bannedGuests = restoredBans;
+  partyState.queueMode = livePartyState.queueMode === 'fifo' ? 'fifo' : 'roundRobin';
 
   const queueItemIds = new Set(
     [...restoredGuests.values()].flatMap((guest) => guest.queue.map((item) => item.id))
@@ -554,11 +561,24 @@ export function buildRoundRobinQueue() {
   return merged;
 }
 
-export function getCombinedQueue() {
-  const roundRobinQueue = buildRoundRobinQueue();
-  if (!partyState.manualOrder?.length) return roundRobinQueue;
+export function buildFifoQueue() {
+  return [...partyState.guests.values()]
+    .flatMap((guest) => guest.queue)
+    .sort((first, second) => {
+      const timeDifference = Date.parse(first.addedAt) - Date.parse(second.addedAt);
+      return timeDifference || first.id.localeCompare(second.id);
+    });
+}
 
-  const byId = new Map(roundRobinQueue.map((item) => [item.id, item]));
+function getQueueByMode() {
+  return partyState.queueMode === 'fifo' ? buildFifoQueue() : buildRoundRobinQueue();
+}
+
+export function getCombinedQueue() {
+  const queueByMode = getQueueByMode();
+  if (!partyState.manualOrder?.length) return queueByMode;
+
+  const byId = new Map(queueByMode.map((item) => [item.id, item]));
   const manuallyPlaced = partyState.manualOrder
     .map((itemId) => byId.get(itemId))
     .filter(Boolean);
@@ -566,8 +586,24 @@ export function getCombinedQueue() {
 
   return [
     ...manuallyPlaced,
-    ...roundRobinQueue.filter((item) => !manuallyPlacedIds.has(item.id))
+    ...queueByMode.filter((item) => !manuallyPlacedIds.has(item.id))
   ];
+}
+
+export function setQueueMode(queueMode) {
+  if (queueMode !== 'roundRobin' && queueMode !== 'fifo') {
+    const error = new Error('queueMode must be roundRobin or fifo');
+    error.status = 400;
+    throw error;
+  }
+
+  // Keep the already visible queue stable. Clearing this snapshot is an explicit
+  // admin action, which then applies the selected mode to every current request.
+  if (!partyState.manualOrder?.length) {
+    partyState.manualOrder = getCombinedQueue().map((item) => item.id);
+  }
+  partyState.queueMode = queueMode;
+  return getCombinedQueue();
 }
 
 export function getGuestQueue(guestId) {
@@ -581,7 +617,7 @@ export function setManualOrder(orderedItemIds) {
     throw error;
   }
 
-  const currentIds = new Set(buildRoundRobinQueue().map((item) => item.id));
+  const currentIds = new Set(getQueueByMode().map((item) => item.id));
   partyState.manualOrder = orderedItemIds.filter((itemId) => currentIds.has(itemId));
   return getCombinedQueue();
 }
@@ -628,6 +664,7 @@ export function serializeQueues(guestId = null) {
       addedAt: partyState.sync.lastSyncedAt
     })),
     manualOrderActive: Boolean(partyState.manualOrder?.length),
+    queueMode: partyState.queueMode,
     sync: partyState.sync
   };
 }
@@ -731,6 +768,7 @@ export function addPinnedPlaylist(playlist) {
     image: playlist.images?.[0]?.url ?? null,
     url: playlist.external_urls?.spotify ?? `https://open.spotify.com/playlist/${playlist.id}`,
     fallbackEnabled: true,
+    visibleToGuests: true,
     trackTotal: Math.max(
       Number(playlist.items?.total ?? playlist.tracks?.total) || 0,
       0
@@ -757,6 +795,15 @@ export function setPinnedPlaylistFallbackEnabled(playlistId, enabled) {
   );
   if (!playlist) return null;
   playlist.fallbackEnabled = Boolean(enabled);
+  return playlist;
+}
+
+export function setPinnedPlaylistVisibleToGuests(playlistId, visibleToGuests) {
+  const playlist = partyState.pinnedPlaylists.find(
+    (item) => item.id === playlistId
+  );
+  if (!playlist) return null;
+  playlist.visibleToGuests = Boolean(visibleToGuests);
   return playlist;
 }
 

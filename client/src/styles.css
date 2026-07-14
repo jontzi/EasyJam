@@ -1305,6 +1305,24 @@ h2.section-label {
   background: rgba(255, 255, 255, 0.035);
 }
 
+/* Keep the primary guest action available while the track details scroll sideways. */
+.playlist-table.has-request-action th:first-child,
+.playlist-table.has-request-action td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.playlist-table.has-request-action th:first-child {
+  background: var(--surface-2);
+}
+
+.playlist-table.has-request-action td:first-child {
+  box-shadow: 8px 0 12px rgba(0, 0, 0, 0.16);
+}
+
 .table-sort-button {
   display: inline-flex;
   align-items: center;
@@ -1565,6 +1583,21 @@ h2.section-label {
   overflow-wrap: anywhere;
 }
 
+.setting-row select {
+  flex: 0 0 auto;
+  min-height: 38px;
+  width: min(100%, 230px);
+  min-width: 180px;
+  max-width: 230px;
+  box-sizing: border-box;
+}
+
+.setting-row > span:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
 .setting-row-range {
   align-items: center;
 }
@@ -1608,7 +1641,7 @@ h2.section-label {
   min-height: 50px;
 }
 
-.host-controls .toolbar button:nth-child(3) {
+.host-controls .toolbar .apply-queue-mode-button {
   grid-column: 1 / -1;
 }
 
@@ -1664,7 +1697,7 @@ h2.section-label {
 }
 
 .pinned-playlist-table {
-  min-width: 620px;
+  min-width: 700px;
 }
 
 .pinned-playlist-select {
@@ -1690,8 +1723,45 @@ h2.section-label {
 }
 
 .pinned-fallback-toggle {
-  accent-color: var(--green-hot);
+  appearance: none;
+  position: relative;
+  width: 28px;
+  min-width: 28px;
+  height: 16px;
+  min-height: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  padding: 0;
   cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.pinned-fallback-toggle::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.82);
+  content: '';
+  transition: transform 140ms ease, background 140ms ease;
+}
+
+.pinned-fallback-toggle:checked {
+  border-color: var(--green-hot);
+  background: var(--green-hot);
+}
+
+.pinned-fallback-toggle:checked::after {
+  background: #071109;
+  transform: translateX(12px);
+}
+
+.pinned-fallback-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .pinned-playlist-remove {
@@ -1705,6 +1775,7 @@ h2.section-label {
 .invite-admin-panel,
 .admin-queue-panel,
 .played-log-panel,
+.spotify-request-log-panel,
 .pinned-panel,
 .host-controls {
   margin-bottom: 0;
@@ -1714,6 +1785,48 @@ h2.section-label {
   max-height: 520px;
   overflow: auto;
   padding-right: 4px;
+}
+
+.spotify-request-log-wrap {
+  max-height: 420px;
+  overflow: auto;
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.spotify-request-log {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.spotify-request-log th,
+.spotify-request-log td {
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.spotify-request-log th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.spotify-request-log code {
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+.spotify-request-rate_limited td,
+.spotify-request-cooldown td,
+.spotify-request-error td,
+.spotify-request-network_error td {
+  color: #ffc7c2;
 }
 
 .played-log-filters {
@@ -1819,8 +1932,13 @@ h2.section-label {
     grid-template-columns: 1fr;
   }
 
-  .host-controls .toolbar button:nth-child(3) {
+  .host-controls .toolbar .apply-queue-mode-button {
     grid-column: auto;
+  }
+
+  .setting-row select {
+    width: 100%;
+    min-width: 0;
   }
 }
 
@@ -2377,7 +2495,7 @@ h2.section-label {
     grid-template-columns: 1fr;
   }
 
-  .host-controls .toolbar button:nth-child(3) {
+  .host-controls .toolbar .apply-queue-mode-button {
     grid-column: auto;
   }
 }
@@ -2416,11 +2534,11 @@ h2.section-label {
   }
 
   .host-controls .toolbar {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .host-controls .toolbar button:nth-child(3) {
-    grid-column: auto;
+  .host-controls .toolbar .apply-queue-mode-button {
+    grid-column: 1 / -1;
   }
 }
 

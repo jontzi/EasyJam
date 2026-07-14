@@ -172,6 +172,7 @@ export async function saveLivePartyState() {
     guests: [...partyState.guests.values()],
     guestOrder: partyState.guestOrder,
     bannedGuests: [...partyState.bannedGuests.values()],
+    queueMode: partyState.queueMode,
     manualOrder: partyState.manualOrder,
     currentItemId: partyState.playback.currentItemId
   });

@@ -38,7 +38,7 @@ setInterval(() => {
   maintainSpotifyPlayback().catch((error) => {
     console.warn(`EasyJam Spotify playback maintenance failed: ${error.message}`);
   });
-}, 5_000).unref();
+}, 10_000).unref();
 
 setInterval(() => {
   refreshPinnedPlaylists()
@@ -46,7 +46,7 @@ setInterval(() => {
     .catch((error) => {
       console.warn(`EasyJam pinned-playlist refresh failed: ${error.message}`);
     });
-}, 60_000).unref();
+}, 15 * 60_000).unref();
 
 app.listen(config.port, () => {
   console.log(`EasyJam server listening on http://localhost:${config.port}`);

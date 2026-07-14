@@ -40,22 +40,30 @@ import {
   setHostPlaylist,
   setInviteSettings,
   setManualOrder,
+  setQueueMode,
   setPinnedPlaylistFallbackEnabled,
+  setPinnedPlaylistVisibleToGuests,
   setRandomFallbackEnabled,
   unbanGuest,
   verifyInvite
 } from './state.js';
 import {
   bootstrapHostPlaylist,
+  cancelScheduledSpotifySync,
   createAuthorizationUrl,
+  clearSpotifyRequestLog,
   exchangeCodeForTokens,
   getCurrentPlayback,
+  getCurrentPlaybackAfterReconnect,
+  getSpotifyRequestLog,
   getPlaylist,
   getPlaylistTracks,
   getRecommendations,
   protectCurrentPlayback,
+  refreshPinnedPlaylists,
   resumeEasyJamPlayback,
   reschedulePendingHandoff,
+  scheduleSpotifySync,
   searchTracks,
   SpotifyError,
   syncSpotifyPlaylist
@@ -84,7 +92,24 @@ const playbackCache = {
   lastError: null
 };
 
-const PLAYBACK_CACHE_MS = 5_000;
+function updatePlaybackCache(current) {
+  playbackCache.current = current;
+  playbackCache.fetchedAt = Date.now();
+  playbackCache.rateLimitedUntil = 0;
+  playbackCache.lastError = null;
+}
+
+function rateLimitedPlaybackResponse(now) {
+  return {
+    current: playbackCache.current,
+    cached: true,
+    playbackUnavailable: !playbackCache.current,
+    rateLimited: true,
+    retryAfterSeconds: Math.ceil((playbackCache.rateLimitedUntil - now) / 1000)
+  };
+}
+
+const PLAYBACK_CACHE_MS = 10_000;
 const LIVE_PARTY_ACTIVITY_PERSIST_MS = 30_000;
 let lastLivePartyActivityPersistedAt = 0;
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60_000;
@@ -203,7 +228,10 @@ function requireInviteOrAdmin(req, res, next) {
   }
   return requireInvite(req, res, next);
 }
-async function syncAfterMutation(options = {}) {
+async function syncAfterMutation(options = {}, { immediate = false } = {}) {
+  if (!immediate) return scheduleSpotifySync(options);
+
+  cancelScheduledSpotifySync();
   try {
     return await syncSpotifyPlaylist(options);
   } catch (error) {
@@ -434,7 +462,8 @@ router.get(
       try {
         await bootstrapHostPlaylist();
         await saveHostPlaylistState();
-        const currentPlayback = await getCurrentPlayback();
+        const currentPlayback = await getCurrentPlaybackAfterReconnect();
+        updatePlaybackCache(currentPlayback);
         const shouldProtectCurrentPlayback = Boolean(currentPlayback?.isPlaying);
         if (shouldProtectCurrentPlayback) {
           partyState.sync.returnToEasyJamPending = true;
@@ -445,7 +474,7 @@ router.get(
           deferToCurrentTrack: true,
           preserveExternalPlayback: true,
           suppressPlaybackStart: shouldProtectCurrentPlayback
-        });
+        }, { immediate: true });
       } catch (bootstrapError) {
         partyState.sync.lastError = {
           message: bootstrapError.message,
@@ -473,7 +502,9 @@ router.get('/session', (req, res) => {
 
   res.json({
     host: hostStatus(),
-    pinnedPlaylists: partyState.pinnedPlaylists,
+    pinnedPlaylists: partyState.pinnedPlaylists.filter(
+      (playlist) => playlist.visibleToGuests !== false
+    ),
     queue: getCombinedQueue().map(serializeQueueItem),
     guestStats: getGuestStats(),
     requestStats: getRequestStats(),
@@ -482,6 +513,7 @@ router.get('/session', (req, res) => {
       ? getDisplayInviteUrl(req)
       : null,
     manualOrderActive: Boolean(partyState.manualOrder?.length),
+    queueMode: partyState.queueMode,
     randomFallback: randomFallbackStatus(),
     autoStartPlayback: config.autoStartPlayback,
     sync: partyState.sync,
@@ -511,10 +543,20 @@ router.get('/admin/status', requireAdmin, (req, res) => {
     bannedGuests: getBannedGuests(),
     pinnedPlaylists: partyState.pinnedPlaylists,
     manualOrderActive: Boolean(partyState.manualOrder?.length),
+    queueMode: partyState.queueMode,
     randomFallback: randomFallbackStatus(),
     sync: partyState.sync,
     invite: serializeInvite(req, true)
   });
+});
+
+router.get('/admin/spotify/request-log', requireAdmin, (_req, res) => {
+  res.json(getSpotifyRequestLog());
+});
+
+router.delete('/admin/spotify/request-log', requireAdmin, (_req, res) => {
+  clearSpotifyRequestLog();
+  res.status(204).end();
 });
 
 router.delete('/admin/guests/:guestId', requireAdmin, asyncHandler(async (req, res) => {
@@ -579,7 +621,7 @@ router.post('/admin/auto-playback', requireAdmin, asyncHandler(async (req, res) 
   const autoStartPlayback = await saveAutoStartPlayback(req.body?.enabled);
   await saveAutoStartPlaybackState();
   const spotifySync = autoStartPlayback.autoStartPlayback
-    ? await syncAfterMutation({ restartIfPaused: true })
+    ? await syncAfterMutation({ restartIfPaused: true }, { immediate: true })
     : null;
   res.json({ autoStartPlayback, spotifySync, sync: partyState.sync });
 }));
@@ -619,12 +661,7 @@ router.get(
     }
 
     if (playbackCache.rateLimitedUntil > now) {
-      res.json({
-        current: playbackCache.current,
-        cached: true,
-        rateLimited: true,
-        retryAfterSeconds: Math.ceil((playbackCache.rateLimitedUntil - now) / 1000)
-      });
+      res.json(rateLimitedPlaybackResponse(now));
       return;
     }
 
@@ -694,6 +731,7 @@ router.get(
         res.json({
           current: playbackCache.current,
           cached: true,
+          playbackUnavailable: !playbackCache.current,
           rateLimited: true,
           retryAfterSeconds: Math.ceil(retryAfterMs / 1000)
         });
@@ -886,6 +924,21 @@ router.get(
 );
 
 router.post(
+  '/admin/queue/mode',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    setQueueMode(req.body?.queueMode);
+    await saveLivePartyState();
+    res.json({
+      queue: getCombinedQueue().map(serializeQueueItem),
+      queueMode: partyState.queueMode,
+      manualOrderActive: Boolean(partyState.manualOrder?.length),
+      sync: partyState.sync
+    });
+  })
+);
+
+router.post(
   '/admin/queue/reorder',
   requireAdmin,
   asyncHandler(async (req, res) => {
@@ -951,7 +1004,11 @@ router.post(
   '/admin/sync',
   requireAdmin,
   asyncHandler(async (_req, res) => {
-    res.json({ spotifySync: await syncSpotifyPlaylist(), sync: partyState.sync });
+    cancelScheduledSpotifySync();
+    res.json({
+      spotifySync: await syncSpotifyPlaylist({ verifyPlaylist: true }),
+      sync: partyState.sync
+    });
   })
 );
 
@@ -972,7 +1029,8 @@ router.post(
       setHostPlaylist(playlist);
       await saveSpotifyPlaylistId(playlist.id);
       await saveHostPlaylistState();
-      const currentPlayback = await getCurrentPlayback();
+      const currentPlayback = await getCurrentPlaybackAfterReconnect();
+      updatePlaybackCache(currentPlayback);
       const shouldProtectCurrentPlayback = Boolean(currentPlayback?.isPlaying);
       if (shouldProtectCurrentPlayback) {
         partyState.sync.returnToEasyJamPending = true;
@@ -983,7 +1041,7 @@ router.post(
         deferToCurrentTrack: true,
         preserveExternalPlayback: true,
         suppressPlaybackStart: shouldProtectCurrentPlayback
-      });
+      }, { immediate: true });
 
       res.json({
         host: hostStatus(),
@@ -1027,7 +1085,8 @@ router.get(
     const tracks = await getPlaylistTracks(
       req.params.playlistId,
       req.query.offset,
-      req.query.limit
+      req.query.limit,
+      req.query.refresh === 'true'
     );
     res.json(tracks);
   })
@@ -1051,6 +1110,12 @@ router.post(
   })
 );
 
+router.post('/admin/pinned-playlists/refresh', requireAdmin, asyncHandler(async (_req, res) => {
+  const result = await refreshPinnedPlaylists();
+  if (result.changed) await savePinnedPlaylists();
+  res.json({ ...result, pinnedPlaylists: partyState.pinnedPlaylists });
+}));
+
 router.delete('/admin/pinned-playlists/:playlistId', requireAdmin, asyncHandler(async (req, res) => {
   removePinnedPlaylist(req.params.playlistId);
   await savePinnedPlaylists();
@@ -1067,6 +1132,27 @@ router.post('/admin/pinned-playlists/:playlistId/fallback', requireAdmin, asyncH
   const playlist = setPinnedPlaylistFallbackEnabled(
     req.params.playlistId,
     req.body.enabled
+  );
+  if (!playlist) {
+    const error = new Error('Pinned playlist not found');
+    error.status = 404;
+    throw error;
+  }
+
+  await savePinnedPlaylists();
+  res.json({ playlist, pinnedPlaylists: partyState.pinnedPlaylists });
+}));
+
+router.post('/admin/pinned-playlists/:playlistId/visibility', requireAdmin, asyncHandler(async (req, res) => {
+  if (typeof req.body?.visibleToGuests !== 'boolean') {
+    const error = new Error('Guest visibility setting must be a boolean');
+    error.status = 400;
+    throw error;
+  }
+
+  const playlist = setPinnedPlaylistVisibleToGuests(
+    req.params.playlistId,
+    req.body.visibleToGuests
   );
   if (!playlist) {
     const error = new Error('Pinned playlist not found');

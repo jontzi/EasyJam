@@ -698,7 +698,7 @@ function TvDisplay() {
       ? await api.current()
       : { current: null };
     setSession(nextSession);
-    setCurrent(nextCurrent.current);
+    setCurrent(nextCurrent.playbackUnavailable ? { unavailable: true } : nextCurrent.current);
     setError('');
   });
 
@@ -885,7 +885,7 @@ function TvDisplay() {
   );
 }
 
-function CurrentTrack({ current, isPlaybackPaused = false, onSubmitTrack, queueCount }) {
+function CurrentTrack({ current, isPlaybackPaused = false, isPlaybackUnavailable = false, onSubmitTrack, queueCount }) {
   const { t } = useTranslation();
   const track = current?.track;
   const progressPercent = usePlaybackProgress(current);
@@ -944,7 +944,7 @@ function CurrentTrack({ current, isPlaybackPaused = false, onSubmitTrack, queueC
             </div>
           </div>
           <div className="empty-copy">
-            <strong>{isPlaybackPaused ? t('playbackPaused') : t('noTrack')}</strong>
+            <strong>{isPlaybackUnavailable ? t('playbackChecking') : isPlaybackPaused ? t('playbackPaused') : t('noTrack')}</strong>
             {isPlaybackPaused ? <small>{t('resumeInSpotify')}</small> : null}
           </div>
         </div>
@@ -1136,6 +1136,7 @@ function PlaylistBrowser({ playlist, onAdd, admin = false, embedded = false }) {
   const [tracks, setTracks] = useState([]);
   const [offset, setOffset] = useState(0);
   const [refreshTick, setRefreshTick] = useState(0);
+  const refreshRequestedRef = useRef(false);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -1143,13 +1144,8 @@ function PlaylistBrowser({ playlist, onAdd, admin = false, embedded = false }) {
 
   useEffect(() => {
     setOffset(0);
+    setSort({ key: 'addedAt', direction: 'desc' });
   }, [playlist?.id]);
-
-  useEffect(() => {
-    if (!playlist?.id || isImportedPlaylist) return undefined;
-    const interval = window.setInterval(() => setRefreshTick((tick) => tick + 1), 60_000);
-    return () => window.clearInterval(interval);
-  }, [isImportedPlaylist, playlist?.id]);
 
   useEffect(() => {
     if (!playlist?.id) return;
@@ -1160,22 +1156,44 @@ function PlaylistBrowser({ playlist, onAdd, admin = false, embedded = false }) {
       setTotal(playlist.tracks.length);
       return;
     }
+    let cancelled = false;
+    const forceRefresh = refreshRequestedRef.current;
+    refreshRequestedRef.current = false;
     setError('');
     setLoading(true);
-    api
-      .playlistTracks(playlist.id, offset, admin)
-      .then((result) => {
-        setTracks(result.tracks);
-        setTotal(result.total);
+    async function loadPage() {
+      try {
+        const result = await api.playlistTracks(playlist.id, offset, admin, forceRefresh);
+        // Spotify's playlist items are oldest-first. Reverse the API page order
+        // for newest-first date sorting so page 1 contains the newest tracks.
+        const pageSize = result.limit || 30;
+        const pageCount = Math.ceil(result.total / pageSize);
+        const pageIndex = Math.floor(offset / pageSize);
+        const sourceOffset =
+          sort.key === 'addedAt' && sort.direction === 'desc'
+            ? Math.max(pageCount - pageIndex - 1, 0) * pageSize
+            : offset;
+        const page = sourceOffset === offset
+          ? result
+          : await api.playlistTracks(playlist.id, sourceOffset, admin, forceRefresh);
+        if (cancelled) return;
+        setTracks(page.tracks);
+        setTotal(page.total);
         setLoading(false);
-      })
-      .catch((err) => {
+      } catch (err) {
+        if (cancelled) return;
         const details = formatErrorDetails(err.details);
         const status = err.status ? `HTTP ${err.status}` : '';
         setError([err.message, status, details].filter(Boolean).join(' · '));
         setLoading(false);
-      });
-  }, [admin, isImportedPlaylist, offset, playlist?.id, playlist?.tracks, refreshTick]);
+      }
+    }
+
+    loadPage();
+    return () => {
+      cancelled = true;
+    };
+  }, [admin, isImportedPlaylist, offset, playlist?.id, playlist?.tracks, refreshTick, sort]);
 
   const sortedTracks = useMemo(() => {
     const valueFor = (track) => {
@@ -1183,18 +1201,29 @@ function PlaylistBrowser({ playlist, onAdd, admin = false, embedded = false }) {
       if (sort.key === 'name') return track.name ?? '';
       if (sort.key === 'album') return track.album ?? '';
       if (sort.key === 'durationMs') return track.durationMs ?? 0;
-      return track.addedAt ? Date.parse(track.addedAt) : 0;
+      const timestamp = track.addedAt ? Date.parse(track.addedAt) : NaN;
+      return Number.isFinite(timestamp) ? timestamp : null;
     };
 
-    return [...tracks].sort((left, right) => {
-      const leftValue = valueFor(left);
-      const rightValue = valueFor(right);
+    return tracks
+      .map((track, index) => ({ track, index }))
+      .sort((leftEntry, rightEntry) => {
+      const leftValue = valueFor(leftEntry.track);
+      const rightValue = valueFor(rightEntry.track);
+      if (leftValue === null || rightValue === null) {
+        if (leftValue === rightValue) return leftEntry.index - rightEntry.index;
+        const missingFirst = sort.direction === 'asc';
+        const leftIsMissing = leftValue === null;
+        return leftIsMissing === missingFirst ? -1 : 1;
+      }
       const comparison =
         typeof leftValue === 'number' && typeof rightValue === 'number'
           ? leftValue - rightValue
           : String(leftValue).localeCompare(String(rightValue), i18n.language);
-      return sort.direction === 'asc' ? comparison : -comparison;
-    });
+      if (comparison !== 0) return sort.direction === 'asc' ? comparison : -comparison;
+      return leftEntry.index - rightEntry.index;
+    })
+      .map(({ track }) => track);
   }, [sort, tracks]);
 
   function toggleSort(key) {
@@ -1229,11 +1258,26 @@ function PlaylistBrowser({ playlist, onAdd, admin = false, embedded = false }) {
             {total ? ` · ${total} ${t('total')}` : ''}
           </div>
         </div>
-        {playlist.url ? (
-          <a className="small-link" href={playlist.url} target="_blank" rel="noreferrer">
-            {t('openSpotify')}
-          </a>
-        ) : null}
+        <div className="toolbar">
+          {!isImportedPlaylist ? (
+            <button
+              type="button"
+              onClick={() => {
+                refreshRequestedRef.current = true;
+                setRefreshTick((tick) => tick + 1);
+              }}
+              disabled={loading}
+            >
+              <RefreshCcw size={16} />
+              {t('refresh')}
+            </button>
+          ) : null}
+          {playlist.url ? (
+            <a className="small-link" href={playlist.url} target="_blank" rel="noreferrer">
+              {t('openSpotify')}
+            </a>
+          ) : null}
+        </div>
       </div>
       <Feedback message={error} tone="error" />
       {loading ? <Feedback message={t('loading')} className="loading-state" /> : null}
@@ -1615,7 +1659,7 @@ function PlaylistPanel({ guestId, guestName, onAdd, pinnedPlaylists, allowPlayli
         <PlaylistShelf playlists={sortedPlaylists} onSelect={setSelectedPlaylist} />
         <PlaylistShelf
           title={t('pinnedPlaylists')}
-          playlists={pinnedPlaylists}
+          playlists={pinnedPlaylists.filter((playlist) => playlist.visibleToGuests !== false)}
           onSelect={setSelectedPlaylist}
         />
       </div>
@@ -1757,7 +1801,7 @@ function GuestApp() {
 
     setSession(sessionResult);
     setQueueData(queueResult);
-    setCurrent(currentResult.current);
+    setCurrent(currentResult.playbackUnavailable ? { unavailable: true } : currentResult.current);
     setError('');
   });
 
@@ -1918,9 +1962,10 @@ function GuestApp() {
 
       {tab === 'jam' ? (
         <>
-          <CurrentTrack
-            current={current}
-            isPlaybackPaused={Boolean(!current && session?.sync?.manualPause)}
+            <CurrentTrack
+              current={current}
+            isPlaybackPaused={Boolean(!current?.track && session?.sync?.manualPause)}
+            isPlaybackUnavailable={Boolean(current?.unavailable)}
             queueCount={queueData.queue.length}
             onSubmitTrack={() => setTab('submit')}
           />
@@ -2347,6 +2392,105 @@ function AdminPlaybackHistory() {
   );
 }
 
+function AdminSpotifyRequestLog() {
+  const { t } = useTranslation();
+  const [requests, setRequests] = useState([]);
+  const [maxEntries, setMaxEntries] = useState(200);
+  const [rateLimitedUntil, setRateLimitedUntil] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  async function loadRequestLog() {
+    setLoading(true);
+    setError('');
+    try {
+      const result = await api.spotifyRequestLog();
+      setRequests(result.requests ?? []);
+      setMaxEntries(result.maxEntries ?? 200);
+      setRateLimitedUntil(result.rateLimitedUntil ?? null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function clearRequestLog() {
+    setLoading(true);
+    setError('');
+    try {
+      await api.clearSpotifyRequestLog();
+      setRequests([]);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadRequestLog();
+  }, []);
+
+  return (
+    <section className="panel spotify-request-log-panel">
+      <div className="playlist-heading">
+        <div>
+          <div className="panel-title">
+            <Radio size={18} />
+            {t('spotifyRequestLog')}
+            <span className="status-pill">{requests.length}/{maxEntries}</span>
+          </div>
+          <div className="muted">{t('spotifyRequestLogHelp')}</div>
+          {rateLimitedUntil ? (
+            <div className="muted">{t('spotifyCooldownUntil', { time: formatDateTime(rateLimitedUntil) })}</div>
+          ) : null}
+        </div>
+        <div className="toolbar">
+          <button type="button" onClick={loadRequestLog} disabled={loading}>
+            <RefreshCcw size={16} />
+            {t('refresh')}
+          </button>
+          <button type="button" onClick={clearRequestLog} disabled={loading || !requests.length}>
+            <Trash2 size={16} />
+            {t('clear')}
+          </button>
+        </div>
+      </div>
+      <Feedback message={error} tone="error" />
+      {requests.length ? (
+        <div className="spotify-request-log-wrap">
+          <table className="spotify-request-log">
+            <thead>
+              <tr>
+                <th>{t('time')}</th>
+                <th>{t('request')}</th>
+                <th>{t('result')}</th>
+                <th>{t('duration')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {requests.map((entry) => (
+                <tr key={entry.id} className={`spotify-request-${entry.outcome}`}>
+                  <td>{formatDateTime(entry.at)}</td>
+                  <td><code>{entry.method} {entry.path}</code></td>
+                  <td>
+                    {entry.status ? `HTTP ${entry.status}` : '—'} · {t(`spotifyRequestOutcome_${entry.outcome}`)}
+                    {entry.retryAfterSeconds ? ` (${entry.retryAfterSeconds}s)` : ''}
+                  </td>
+                  <td>{entry.durationMs} ms</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <Feedback message={t('emptySpotifyRequestLog')} />
+      )}
+    </section>
+  );
+}
+
 function SpotifySetupForm({ onSaved, defaultRedirectUri }) {
   const { t } = useTranslation();
   const [clientId, setClientId] = useState('');
@@ -2763,7 +2907,7 @@ function AdminApp() {
 
     setStatus(nextStatus);
     setQueue(nextStatus.queue ?? []);
-    setCurrent(currentResult.current);
+    setCurrent(currentResult.playbackUnavailable ? { unavailable: true } : currentResult.current);
     setError('');
   });
 
@@ -2827,8 +2971,13 @@ function AdminApp() {
     await runAdminAction('unbanGuest', () => api.unbanGuest(guest.id));
   }
 
-  async function resetOrder() {
-    const result = await runAdminAction('reset', () => api.resetOrder());
+  async function applyQueueMode() {
+    const result = await runAdminAction('applyQueueMode', () => api.resetOrder());
+    if (result?.queue) setQueue(result.queue);
+  }
+
+  async function setQueueMode(queueMode) {
+    const result = await runAdminAction('queueMode', () => api.setQueueMode(queueMode));
     if (result?.queue) setQueue(result.queue);
   }
 
@@ -2883,10 +3032,21 @@ function AdminApp() {
     await refresh();
   }
 
+  async function refreshPinnedPlaylists() {
+    await runAdminAction('refreshPinnedPlaylists', () => api.refreshPinnedPlaylists());
+  }
+
   async function setPinnedFallback(playlistId, enabled) {
     await runAdminAction(
       `pinnedFallback-${playlistId}`,
       () => api.setPinnedFallback(playlistId, enabled)
+    );
+  }
+
+  async function setPinnedGuestVisibility(playlistId, visibleToGuests) {
+    await runAdminAction(
+      `pinnedVisibility-${playlistId}`,
+      () => api.setPinnedGuestVisibility(playlistId, visibleToGuests)
     );
   }
 
@@ -2974,7 +3134,8 @@ function AdminApp() {
         <>
         <CurrentTrack
           current={current}
-          isPlaybackPaused={Boolean(!current && status?.sync?.manualPause)}
+          isPlaybackPaused={Boolean(!current?.track && status?.sync?.manualPause)}
+          isPlaybackUnavailable={Boolean(current?.unavailable)}
           queueCount={queue.length}
         />
         <div className="admin-workspace">
@@ -3029,11 +3190,12 @@ function AdminApp() {
             </button>
             <button
               type="button"
-              onClick={resetOrder}
+              onClick={applyQueueMode}
+              className="apply-queue-mode-button"
               disabled={Boolean(busyAction)}
             >
               <Lock size={16} />
-              {t('resetRoundRobin')}
+              {t('applyQueueMode')}
             </button>
             <button
               type="button"
@@ -3047,6 +3209,20 @@ function AdminApp() {
               <span className="status-pill">{t('manualLocked')}</span>
             ) : null}
             </div>
+            <label className="setting-row">
+              <span>
+                <strong>{t('queueMode')}</strong>
+                <small>{t('queueModeHelp')}</small>
+              </span>
+              <select
+                value={status?.queueMode ?? 'roundRobin'}
+                onChange={(event) => setQueueMode(event.target.value)}
+                disabled={Boolean(busyAction)}
+              >
+                <option value="roundRobin">{t('queueModeRoundRobin')}</option>
+                <option value="fifo">{t('queueModeFifo')}</option>
+              </select>
+            </label>
             <label className="setting-row">
               <span>
                 <strong>{t('randomFallback')}</strong>
@@ -3101,10 +3277,22 @@ function AdminApp() {
 
           <AdminPlaybackHistory />
 
+          <AdminSpotifyRequestLog />
+
           <section className="panel pinned-panel">
-            <div className="panel-title">
-              <ListMusic size={18} />
-              {t('pinnedPlaylists')}
+            <div className="playlist-heading">
+              <div className="panel-title">
+                <ListMusic size={18} />
+                {t('pinnedPlaylists')}
+              </div>
+              <button
+                type="button"
+                onClick={refreshPinnedPlaylists}
+                disabled={Boolean(busyAction)}
+              >
+                <RefreshCcw size={16} />
+                {t('refresh')}
+              </button>
             </div>
             <form className="inline-form" onSubmit={pinPlaylist}>
               <input
@@ -3126,6 +3314,7 @@ function AdminApp() {
                       <th>{t('playlistOwner')}</th>
                       <th>{t('trackCount')}</th>
                       <th>{t('useAsFallback')}</th>
+                      <th>{t('visibleToGuests')}</th>
                       <th aria-label={t('remove')} />
                     </tr>
                   </thead>
@@ -3154,6 +3343,16 @@ function AdminApp() {
                             onChange={(event) => setPinnedFallback(playlist.id, event.target.checked)}
                             disabled={Boolean(busyAction)}
                             aria-label={t('useAsFallbackFor', { name: playlist.name })}
+                          />
+                        </td>
+                        <td>
+                          <input
+                            className="pinned-fallback-toggle"
+                            type="checkbox"
+                            checked={playlist.visibleToGuests !== false}
+                            onChange={(event) => setPinnedGuestVisibility(playlist.id, event.target.checked)}
+                            disabled={Boolean(busyAction)}
+                            aria-label={t('visibleToGuestsFor', { name: playlist.name })}
                           />
                         </td>
                         <td>

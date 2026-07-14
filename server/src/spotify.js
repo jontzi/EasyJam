@@ -3,10 +3,12 @@ import { config, spotifyScopes } from './config.js';
 import {
   getCombinedQueue,
   partyState,
+  recordPlayback,
   setHostPlaylist,
   setHostTokens,
   setHostUser
 } from './state.js';
+import { saveLivePartyState, savePlayedTrack } from './storage.js';
 
 const ACCOUNTS_BASE = 'https://accounts.spotify.com';
 const API_BASE = 'https://api.spotify.com/v1';
@@ -14,13 +16,56 @@ const RANDOM_FALLBACK_TRACK_COUNT = 2;
 const RANDOM_FALLBACK_PAGE_SIZE = 50;
 const FALLBACK_SAFETY_TRACK_COUNT = 2;
 const HANDOFF_RESCHEDULE_TOLERANCE_MS = 100;
-const PLAYLIST_ITEMS_CACHE_MS = 30_000;
-const RANDOM_PAGE_CACHE_MS = 15_000;
+const PLAYLIST_ITEMS_CACHE_MS = 15 * 60_000;
+const RANDOM_FALLBACK_PAGE_CACHE_MS = 5 * 60_000;
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 30_000;
+const MIN_HANDOFF_RETRY_MS = 1_000;
+const EXTERNAL_PLAYBACK_END_CONFIRMATION_MS = 10_000;
+const RECONNECT_PLAYBACK_CHECK_DELAYS_MS = [0, 2_000, 4_000];
+const PLAYBACK_SNAPSHOT_CACHE_MS = 10_000;
+const SPOTIFY_REQUEST_LOG_LIMIT = 200;
+const AUTOMATIC_SYNC_DEBOUNCE_MS = 1_500;
+const AUTOMATIC_SYNC_MIN_INTERVAL_MS = 10_000;
 
 let pendingHandoffTimer = null;
+let scheduledSyncTimer = null;
+let scheduledSyncOptions = null;
+let lastAutomaticSyncAt = 0;
 let spotifyRateLimitedUntil = 0;
 const playlistItemsCache = new Map();
+const fallbackPageCache = new Map();
+const spotifyRequestLog = [];
+const playbackSnapshot = {
+  current: null,
+  fetchedAt: 0,
+  inFlight: null
+};
+
+function recordSpotifyRequest({ method = 'GET', path, status, durationMs, outcome, retryAfterSeconds = null }) {
+  spotifyRequestLog.unshift({
+    id: crypto.randomUUID(),
+    at: new Date().toISOString(),
+    method,
+    path,
+    status: status ?? null,
+    durationMs: Math.max(0, Math.round(durationMs ?? 0)),
+    outcome,
+    retryAfterSeconds
+  });
+  if (spotifyRequestLog.length > SPOTIFY_REQUEST_LOG_LIMIT) spotifyRequestLog.length = SPOTIFY_REQUEST_LOG_LIMIT;
+}
+
+export function getSpotifyRequestLog() {
+  return {
+    requests: spotifyRequestLog,
+    maxEntries: SPOTIFY_REQUEST_LOG_LIMIT,
+    rateLimitedUntil: spotifyRateLimitedUntil || null
+  };
+}
+
+export function clearSpotifyRequestLog() {
+  spotifyRequestLog.length = 0;
+}
 
 export async function refreshPinnedPlaylists() {
   if (!partyState.host.tokens?.accessToken || !partyState.pinnedPlaylists.length) {
@@ -61,6 +106,7 @@ export async function refreshPinnedPlaylists() {
     return next;
   });
 
+  if (changed) fallbackPageCache.clear();
   return { skipped: false, changed };
 }
 
@@ -114,15 +160,31 @@ async function readSpotifyResponse(response) {
 
 async function requestToken(body) {
   requireSpotifyConfig();
-  const response = await fetch(`${ACCOUNTS_BASE}/api/token`, {
-    method: 'POST',
-    headers: {
-      Authorization: tokenAuthHeader(),
-      'Content-Type': 'application/x-www-form-urlencoded'
-    },
-    body: new URLSearchParams(body)
-  });
+  const startedAt = Date.now();
+  let response;
+  try {
+    response = await fetch(`${ACCOUNTS_BASE}/api/token`, {
+      method: 'POST',
+      headers: {
+        Authorization: tokenAuthHeader(),
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams(body)
+    });
+  } catch (error) {
+    recordSpotifyRequest({
+      method: 'POST', path: 'accounts/api/token', durationMs: Date.now() - startedAt, outcome: 'network_error'
+    });
+    throw error;
+  }
   const payload = await readSpotifyResponse(response);
+  recordSpotifyRequest({
+    method: 'POST',
+    path: 'accounts/api/token',
+    status: response.status,
+    durationMs: Date.now() - startedAt,
+    outcome: response.ok ? 'success' : 'error'
+  });
 
   if (!response.ok) {
     throw new SpotifyError(
@@ -189,32 +251,44 @@ export async function ensureAccessToken() {
 }
 
 export async function spotifyApi(path, options = {}) {
+  const method = options.method ?? 'GET';
   const now = Date.now();
   if (spotifyRateLimitedUntil > now) {
     const retryAfterSeconds = Math.ceil((spotifyRateLimitedUntil - now) / 1000);
+    recordSpotifyRequest({ method, path, status: 429, outcome: 'cooldown', retryAfterSeconds });
     throw new SpotifyError(
       'Spotify rate limit is active. Try again shortly.',
       429,
-      { method: options.method ?? 'GET', path },
+      { method, path },
       retryAfterSeconds
     );
   }
 
   const accessToken = await ensureAccessToken();
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-      ...(options.headers ?? {})
-    },
-    body:
-      options.body && typeof options.body !== 'string'
-        ? JSON.stringify(options.body)
-        : options.body
-  });
+  const startedAt = Date.now();
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        ...(options.headers ?? {})
+      },
+      body:
+        options.body && typeof options.body !== 'string'
+          ? JSON.stringify(options.body)
+          : options.body
+    });
+  } catch (error) {
+    recordSpotifyRequest({ method, path, durationMs: Date.now() - startedAt, outcome: 'network_error' });
+    throw error;
+  }
 
-  if (response.status === 204) return null;
+  if (response.status === 204) {
+    recordSpotifyRequest({ method, path, status: response.status, durationMs: Date.now() - startedAt, outcome: 'success' });
+    return null;
+  }
 
   const payload = await readSpotifyResponse(response);
 
@@ -232,25 +306,34 @@ export async function spotifyApi(path, options = {}) {
         Date.now() + retryAfterSeconds * 1000
       );
     }
+    recordSpotifyRequest({
+      method,
+      path,
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+      outcome: response.status === 429 ? 'rate_limited' : 'error',
+      retryAfterSeconds
+    });
     throw new SpotifyError(
       payload?.error?.message ?? payload?.error_description ?? 'Spotify API request failed',
       response.status,
       {
         spotify: payload,
-        method: options.method ?? 'GET',
+        method,
         path
       },
       retryAfterSeconds
     );
   }
 
+  recordSpotifyRequest({ method, path, status: response.status, durationMs: Date.now() - startedAt, outcome: 'success' });
   return payload;
 }
 
-async function getCachedPlaylistItems(path, cacheMs) {
+async function getCachedPlaylistItems(path, cacheMs, { force = false } = {}) {
   const now = Date.now();
   const cached = playlistItemsCache.get(path);
-  if (cached && cached.expiresAt > now) return cached.promise;
+  if (!force && cached && cached.expiresAt > now) return cached.promise;
 
   const promise = spotifyApi(path).catch((error) => {
     playlistItemsCache.delete(path);
@@ -258,6 +341,40 @@ async function getCachedPlaylistItems(path, cacheMs) {
   });
   playlistItemsCache.set(path, { expiresAt: now + cacheMs, promise });
   return promise;
+}
+
+function sameUriSequence(left, right) {
+  return left.length === right.length && left.every((uri, index) => uri === right[index]);
+}
+
+async function getFallbackPage(playlist) {
+  const now = Date.now();
+  const cached = fallbackPageCache.get(playlist.id);
+  if (cached && cached.expiresAt > now) return cached.tracks;
+
+  const pageLimit = Math.min(RANDOM_FALLBACK_PAGE_SIZE, playlist.total);
+  const maxOffset = Math.max(playlist.total - pageLimit, 0);
+  const offset = maxOffset ? Math.floor(Math.random() * (maxOffset + 1)) : 0;
+  const params = new URLSearchParams({
+    offset: String(offset),
+    limit: String(pageLimit),
+    fields:
+      'items(item(id,name,uri,duration_ms,explicit,artists(name),album(name,images)))'
+  });
+  const result = await getCachedPlaylistItems(
+    `/playlists/${playlist.id}/items?${params.toString()}`,
+    RANDOM_FALLBACK_PAGE_CACHE_MS
+  );
+  const tracks = shuffle(
+    result.items
+      ?.map((playlistItem) => normalizeSpotifyTrack(playlistItem.item))
+      .filter((track) => track?.uri?.startsWith('spotify:track:')) ?? []
+  );
+  fallbackPageCache.set(playlist.id, {
+    expiresAt: now + RANDOM_FALLBACK_PAGE_CACHE_MS,
+    tracks
+  });
+  return tracks;
 }
 
 export function normalizeSpotifyTrack(track, item = null) {
@@ -313,6 +430,123 @@ function clearPendingHandoffTimer() {
   }
 }
 
+function clearScheduledSyncTimer() {
+  if (scheduledSyncTimer) {
+    clearTimeout(scheduledSyncTimer);
+    scheduledSyncTimer = null;
+  }
+}
+
+function mergeScheduledSyncOptions(current = {}, next = {}) {
+  return {
+    restartIfPaused: Boolean(current.restartIfPaused || next.restartIfPaused),
+    deferToCurrentTrack: Boolean(current.deferToCurrentTrack || next.deferToCurrentTrack),
+    preserveCurrentTrack: Boolean(current.preserveCurrentTrack || next.preserveCurrentTrack),
+    preserveExternalPlayback: Boolean(
+      current.preserveExternalPlayback || next.preserveExternalPlayback
+    )
+  };
+}
+
+function recordScheduledSyncError(error) {
+  partyState.sync.lastError = {
+    message: error.message,
+    status: error.status ?? 500,
+    details: error.details ?? null
+  };
+}
+
+function scheduleQueuedSync(delayMs) {
+  clearScheduledSyncTimer();
+  const dueAt = Date.now() + delayMs;
+  partyState.sync.syncPending = true;
+  partyState.sync.scheduledSyncAt = new Date(dueAt).toISOString();
+  scheduledSyncTimer = setTimeout(() => {
+    scheduledSyncTimer = null;
+    void runScheduledSpotifySync();
+  }, delayMs);
+  scheduledSyncTimer.unref?.();
+}
+
+async function runScheduledSpotifySync() {
+  if (!scheduledSyncOptions) return;
+  if (partyState.sync.inFlight) {
+    scheduleQueuedSync(AUTOMATIC_SYNC_DEBOUNCE_MS);
+    return;
+  }
+
+  const options = scheduledSyncOptions;
+  scheduledSyncOptions = null;
+  partyState.sync.syncPending = false;
+  partyState.sync.scheduledSyncAt = null;
+  lastAutomaticSyncAt = Date.now();
+
+  try {
+    await syncSpotifyPlaylist(options);
+  } catch (error) {
+    recordScheduledSyncError(error);
+    if (error.status === 429) {
+      scheduledSyncOptions = mergeScheduledSyncOptions(scheduledSyncOptions ?? {}, options);
+      const retryAfterMs = Math.max(
+        Number(error.retryAfterSeconds) * 1000 || 0,
+        AUTOMATIC_SYNC_MIN_INTERVAL_MS
+      );
+      scheduleQueuedSync(retryAfterMs);
+    }
+  }
+
+  if (scheduledSyncOptions && !scheduledSyncTimer) {
+    const waitMs = Math.max(
+      AUTOMATIC_SYNC_DEBOUNCE_MS,
+      lastAutomaticSyncAt + AUTOMATIC_SYNC_MIN_INTERVAL_MS - Date.now()
+    );
+    scheduleQueuedSync(waitMs);
+  }
+}
+
+export function scheduleSpotifySync(options = {}) {
+  scheduledSyncOptions = mergeScheduledSyncOptions(scheduledSyncOptions ?? {}, options);
+  const waitMs = Math.max(
+    AUTOMATIC_SYNC_DEBOUNCE_MS,
+    lastAutomaticSyncAt + AUTOMATIC_SYNC_MIN_INTERVAL_MS - Date.now()
+  );
+  scheduleQueuedSync(waitMs);
+  return {
+    scheduled: true,
+    dueAt: partyState.sync.scheduledSyncAt
+  };
+}
+
+export function cancelScheduledSpotifySync() {
+  clearScheduledSyncTimer();
+  scheduledSyncOptions = null;
+  partyState.sync.syncPending = false;
+  partyState.sync.scheduledSyncAt = null;
+}
+
+function recordPendingHandoffError(error) {
+  partyState.sync.lastError = {
+    message: error.message,
+    status: error.status ?? 500,
+    details: error.details ?? null
+  };
+}
+
+function runPendingHandoff() {
+  pendingHandoffTimer = null;
+  void executePendingHandoff().catch((error) => {
+    recordPendingHandoffError(error);
+    if (error.status !== 429 || !partyState.sync.pendingHandoff?.nextUri) return;
+
+    const retryAfterMs = Math.max(
+      Number(error.retryAfterSeconds) * 1000 || 0,
+      MIN_HANDOFF_RETRY_MS
+    );
+    pendingHandoffTimer = setTimeout(runPendingHandoff, retryAfterMs);
+    pendingHandoffTimer.unref?.();
+  });
+}
+
 function schedulePendingHandoff(playback) {
   const pendingHandoff = partyState.sync.pendingHandoff;
   if (!pendingHandoff?.nextUri || !playback?.track?.durationMs) return;
@@ -322,16 +556,10 @@ function schedulePendingHandoff(playback) {
     Number(playback.track.durationMs) - Number(playback.progressMs ?? 0),
     0
   );
-  pendingHandoffTimer = setTimeout(() => {
-    pendingHandoffTimer = null;
-    void executePendingHandoff().catch((error) => {
-      partyState.sync.lastError = {
-        message: error.message,
-        status: error.status ?? 500,
-        details: error.details ?? null
-      };
-    });
-  }, Math.max(remainingMs - config.handoffLeadMs, 0));
+  pendingHandoffTimer = setTimeout(
+    runPendingHandoff,
+    Math.max(remainingMs - config.handoffLeadMs, 0)
+  );
   pendingHandoffTimer.unref?.();
 }
 
@@ -348,7 +576,9 @@ async function executePendingHandoff() {
     return;
   }
 
-  const playback = await getCurrentPlayback();
+  // This runs at the configured handoff lead, so it must not make a decision
+  // from the normal shared playback snapshot.
+  const playback = await getCurrentPlayback({ force: true });
   if (!playback?.isPlaying) {
     pauseAutomaticPlayback();
     return;
@@ -381,6 +611,7 @@ function pauseAutomaticPlayback() {
   partyState.sync.returnToEasyJamPending = false;
   partyState.sync.pendingHandoff = null;
   partyState.sync.protectedPlaybackUri = null;
+  partyState.sync.noActivePlaybackSince = null;
   clearPendingHandoffTimer();
 }
 
@@ -393,6 +624,7 @@ export function protectCurrentPlayback(currentPlayback) {
   if (!trackUri) return false;
 
   partyState.sync.protectedPlaybackUri = trackUri;
+  partyState.sync.noActivePlaybackSince = null;
   partyState.sync.pendingHandoff = null;
   clearPendingHandoffTimer();
   return true;
@@ -446,24 +678,7 @@ async function getRandomFallbackTracks(
     attempts += 1;
     const playlist =
       availablePlaylists[Math.floor(Math.random() * availablePlaylists.length)];
-    const pageLimit = Math.min(RANDOM_FALLBACK_PAGE_SIZE, playlist.total);
-    const maxOffset = Math.max(playlist.total - pageLimit, 0);
-    const offset = maxOffset ? Math.floor(Math.random() * (maxOffset + 1)) : 0;
-    const params = new URLSearchParams({
-      offset: String(offset),
-      limit: String(pageLimit),
-      fields:
-        'items(item(id,name,uri,duration_ms,explicit,artists(name),album(name,images)))'
-    });
-    const result = await getCachedPlaylistItems(
-      `/playlists/${playlist.id}/items?${params.toString()}`,
-      RANDOM_PAGE_CACHE_MS
-    );
-    const pageTracks = shuffle(
-      result.items
-        ?.map((playlistItem) => normalizeSpotifyTrack(playlistItem.item))
-        .filter((track) => track?.uri?.startsWith('spotify:track:')) ?? []
-    );
+    const pageTracks = await getFallbackPage(playlist);
 
     for (const track of pageTracks) {
       if (tracks.length >= limit) break;
@@ -514,6 +729,7 @@ export async function syncSpotifyPlaylist(
     preserveCurrentTrack = false,
     preserveExternalPlayback = false,
     suppressPlaybackStart = false,
+    verifyPlaylist = false,
     startAtUri = null,
     currentTrackUri = null
   } = {}
@@ -621,6 +837,7 @@ export async function syncSpotifyPlaylist(
     }
   }
   const uriChunks = chunks(uris, 100);
+  const playlistUnchanged = sameUriSequence(uris, partyState.sync.lastPlaylistUris);
   let source = shouldAppendFallbackTail
     ? partyState.sync.lastSource ?? 'randomFallback'
     : queueItems.length
@@ -647,7 +864,7 @@ export async function syncSpotifyPlaylist(
 
   try {
     let replaceResult = null;
-    if (uris.length) {
+    if (uris.length && !playlistUnchanged) {
       replaceResult = await spotifyApi(`/playlists/${partyState.host.playlistId}/items`, {
         method: 'PUT',
         body: { uris: uriChunks[0] ?? [] }
@@ -659,21 +876,23 @@ export async function syncSpotifyPlaylist(
           body: { uris: chunk }
         });
       }
+      partyState.sync.lastPlaylistSnapshotId = replaceResult?.snapshot_id ?? null;
     }
 
-    const verifyParams = new URLSearchParams({
-      limit: '1',
-      fields: 'total,items(item(uri))'
-    });
-    const verification = await spotifyApi(
-      `/playlists/${partyState.host.playlistId}/items?${verifyParams.toString()}`
-    );
-    if (!uris.length && Number(verification?.total) > 0) {
-      source = 'preserved';
+    let verification = null;
+    if (verifyPlaylist) {
+      const verifyParams = new URLSearchParams({
+        limit: '1',
+        fields: 'total,items(item(uri))'
+      });
+      verification = await spotifyApi(
+        `/playlists/${partyState.host.playlistId}/items?${verifyParams.toString()}`
+      );
+      if (!uris.length && Number(verification?.total) > 0) {
+        source = 'preserved';
+      }
     }
-    partyState.sync.lastPlaylistUris = uris.length
-      ? [...uris]
-      : partyState.sync.lastPlaylistUris;
+    if (uris.length) partyState.sync.lastPlaylistUris = [...uris];
 
     let pausedOrOutsideEasyJam = false;
     let deferExternalPlayback = false;
@@ -718,6 +937,7 @@ export async function syncSpotifyPlaylist(
     }
 
     partyState.sync.lastSource = source;
+    partyState.sync.playlistRefreshPending = false;
 
     if (partyState.sync.pendingHandoff?.currentUri === currentPlaybackUri) {
       schedulePendingHandoff(currentPlaybackForSync);
@@ -729,9 +949,10 @@ export async function syncSpotifyPlaylist(
       count: uris.length,
       source,
       playlistId: partyState.host.playlistId,
-      snapshotId: replaceResult?.snapshot_id ?? null,
+      snapshotId: replaceResult?.snapshot_id ?? partyState.sync.lastPlaylistSnapshotId,
       verifiedTotal: verification?.total ?? null,
-      firstUri: verification?.items?.[0]?.item?.uri ?? null
+      firstUri: verification?.items?.[0]?.item?.uri ?? null,
+      playlistUnchanged
     };
   } catch (error) {
     const details = {
@@ -765,13 +986,15 @@ export async function startPlaylistPlayback(startAtUri = null) {
     throw new SpotifyError('Host playlist is not ready', 400);
   }
 
-  return spotifyApi('/me/player/play', {
+  const result = await spotifyApi('/me/player/play', {
     method: 'PUT',
     body: {
       context_uri: `spotify:playlist:${partyState.host.playlistId}`,
       ...(startAtUri ? { offset: { uri: startAtUri } } : {})
     }
   });
+  invalidateCurrentPlaybackSnapshot();
+  return result;
 }
 
 export async function resumeEasyJamPlayback() {
@@ -779,24 +1002,59 @@ export async function resumeEasyJamPlayback() {
   partyState.sync.returnToEasyJamPending = false;
   partyState.sync.pendingHandoff = null;
   partyState.sync.protectedPlaybackUri = null;
+  partyState.sync.noActivePlaybackSince = null;
   clearPendingHandoffTimer();
   const result = await startPlaylistPlayback();
   partyState.sync.autoStarted = true;
   return result;
 }
 
-export async function getCurrentPlayback() {
-  const current = await spotifyApi('/me/player');
-  if (!current?.item) return null;
+export function invalidateCurrentPlaybackSnapshot() {
+  playbackSnapshot.current = null;
+  playbackSnapshot.fetchedAt = 0;
+}
 
-  return {
-    isPlaying: Boolean(current.is_playing),
-    progressMs: current.progress_ms ?? 0,
-    track: normalizeSpotifyTrack(current.item),
-    contextUri: current.context?.uri ?? null,
-    deviceId: current.device?.id ?? null,
-    deviceName: current.device?.name ?? null
-  };
+export async function getCurrentPlayback({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && playbackSnapshot.fetchedAt && now - playbackSnapshot.fetchedAt < PLAYBACK_SNAPSHOT_CACHE_MS) {
+    return playbackSnapshot.current;
+  }
+  if (playbackSnapshot.inFlight) return playbackSnapshot.inFlight;
+
+  playbackSnapshot.inFlight = spotifyApi('/me/player')
+    .then((current) => {
+      playbackSnapshot.current = current?.item
+        ? {
+            isPlaying: Boolean(current.is_playing),
+            progressMs: current.progress_ms ?? 0,
+            track: normalizeSpotifyTrack(current.item),
+            contextUri: current.context?.uri ?? null,
+            deviceId: current.device?.id ?? null,
+            deviceName: current.device?.name ?? null
+          }
+        : null;
+      playbackSnapshot.fetchedAt = Date.now();
+      return playbackSnapshot.current;
+    })
+    .finally(() => {
+      playbackSnapshot.inFlight = null;
+    });
+  return playbackSnapshot.inFlight;
+}
+
+export async function getCurrentPlaybackAfterReconnect() {
+  for (const [attempt, delayMs] of RECONNECT_PLAYBACK_CHECK_DELAYS_MS.entries()) {
+    if (delayMs) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    const playback = await getCurrentPlayback({ force: true });
+    if (playback) return playback;
+
+    // A 204 response can be a short Spotify Connect/device transition immediately
+    // after OAuth. Keep checking briefly before treating it as genuinely inactive.
+    if (attempt === RECONNECT_PLAYBACK_CHECK_DELAYS_MS.length - 1) return null;
+  }
+  return null;
 }
 
 export async function maintainSpotifyPlayback() {
@@ -812,11 +1070,27 @@ export async function maintainSpotifyPlayback() {
 
   const playback = await getCurrentPlayback();
   if (!playback) {
+    const waitingForExternalPlayback = Boolean(
+      partyState.sync.returnToEasyJamPending || partyState.sync.protectedPlaybackUri
+    );
+    if (waitingForExternalPlayback) {
+      const now = Date.now();
+      partyState.sync.noActivePlaybackSince ??= now;
+      if (now - partyState.sync.noActivePlaybackSince < EXTERNAL_PLAYBACK_END_CONFIRMATION_MS) {
+        return { skipped: true, reason: 'Confirming that the external Spotify track has ended' };
+      }
+
+      // Spotify can return no active item for a moment at a track boundary. Once it
+      // remains absent for two maintenance polls, continue the promised handoff.
+      partyState.sync.protectedPlaybackUri = null;
+      partyState.sync.noActivePlaybackSince = null;
+      resumeAutomaticPlayback();
+      return syncSpotifyPlaylist({ restartIfPaused: true, forceRestart: true });
+    }
     if (
       partyState.sync.autoStarted ||
       partyState.sync.pendingHandoff ||
-      partyState.sync.returnToEasyJamPending ||
-      partyState.sync.protectedPlaybackUri
+      partyState.sync.returnToEasyJamPending
     ) {
       pauseAutomaticPlayback();
     }
@@ -826,6 +1100,22 @@ export async function maintainSpotifyPlayback() {
   if (!playback.isPlaying) {
     pauseAutomaticPlayback();
     return { skipped: true, reason: 'Spotify playback is paused' };
+  }
+
+  partyState.sync.noActivePlaybackSince = null;
+
+  const playbackUpdate = recordPlayback(playback);
+  if (playbackUpdate.historyItem) {
+    await savePlayedTrack(playbackUpdate.historyItem);
+  }
+  if (playbackUpdate.changed) {
+    await saveLivePartyState();
+  }
+  if (playbackUpdate.removedItem) {
+    partyState.sync.playlistRefreshPending = true;
+  }
+  if (partyState.sync.playlistRefreshPending) {
+    return syncSpotifyPlaylist({ preserveCurrentTrack: true });
   }
 
   resumeAutomaticPlayback();
@@ -888,7 +1178,7 @@ export async function reschedulePendingHandoff() {
   const pendingHandoff = partyState.sync.pendingHandoff;
   if (!pendingHandoff?.currentUri || partyState.sync.inFlight) return;
 
-  const playback = await getCurrentPlayback();
+  const playback = await getCurrentPlayback({ force: true });
   if (playback?.isPlaying && playback.track?.uri === pendingHandoff.currentUri) {
     schedulePendingHandoff(playback);
   }
@@ -911,7 +1201,7 @@ export async function getPlaylist(playlistId) {
   return spotifyApi(`/playlists/${playlistId}`);
 }
 
-export async function getPlaylistTracks(playlistId, offset = 0, limit = 30) {
+export async function getPlaylistTracks(playlistId, offset = 0, limit = 30, refresh = false) {
   const params = new URLSearchParams({
     offset: String(Math.max(Number(offset) || 0, 0)),
     limit: String(Math.min(Math.max(Number(limit) || 30, 1), 50)),
@@ -920,7 +1210,8 @@ export async function getPlaylistTracks(playlistId, offset = 0, limit = 30) {
   });
   const result = await getCachedPlaylistItems(
     `/playlists/${playlistId}/items?${params.toString()}`,
-    PLAYLIST_ITEMS_CACHE_MS
+    PLAYLIST_ITEMS_CACHE_MS,
+    { force: refresh }
   );
   return {
     total: result.total ?? 0,
