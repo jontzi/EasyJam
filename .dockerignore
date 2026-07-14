@@ -1,0 +1,9 @@
+node_modules
+client/node_modules
+server/node_modules
+client/dist
+data
+.env
+.git
+AGENT_NOTEBOOK.md
+npm-debug.log*
