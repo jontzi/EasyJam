@@ -1,13 +1,13 @@
 # EasyJam Spotify Party Queue
 
-Node.js + React -sovellus, jossa isäntä kirjautuu Spotifyyn ja vieraat lisäävät kappaleita ilman kirjautumista selainkohtaisen UUID:n avulla. Backend pitää vieraiden jonot erillään ja muodostaa Spotifyhin synkronoitavan jonon round-robin-limityksellä.
+Node.js + React app where the host connects to Spotify and guests add tracks without signing in, using a browser-specific UUID. The backend keeps guest queues separate and builds a round-robin queue that can be synchronized to Spotify.
 
-## Käynnistys
+## Getting started
 
-1. Kopioi `.env.example` tiedostoksi `.env`.
-2. Luo Spotify Developer Dashboardissa appi ja lisää Redirect URI: `http://localhost:5050/api/auth/callback`.
-3. Täytä `.env` arvoilla `SPOTIFY_CLIENT_ID` ja `SPOTIFY_CLIENT_SECRET`.
-4. Asenna riippuvuudet ja käynnistä:
+1. Copy `.env.example` to `.env`.
+2. Create an app in the Spotify Developer Dashboard and add this Redirect URI: `http://localhost:5050/api/auth/callback`.
+3. Set `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env`.
+4. Install dependencies and start the app:
 
 ```bash
 npm install
@@ -25,58 +25,58 @@ http://localhost:5050
 
 Use this single-port URL when you just want to try the app locally without relying on the separate Vite dev server.
 
-Paikallisessa kehityskäytössä Spotify-arvot voi myös tallentaa admin-paneelista, jos `.env` puuttuu:
+For local development, you can also save Spotify settings from the admin panel if `.env` is missing:
 
 ```text
 http://localhost:5050/admin
 ```
 
-Lomake tallentaa arvot paikalliseen `.env`-tiedostoon ja on rajattu localhost-käyttöön.
-Jos OAuth redirect pitää korjata myöhemmin, avaa `http://localhost:5050/admin?setup=spotify`.
+The form saves values to a local `.env` file and is restricted to localhost.
+To update the OAuth redirect later, open `http://localhost:5050/admin?setup=spotify`.
 
-Admin-paneelin suojaus:
+Admin panel security:
 
-- Vierasnäkymässä voidaan näyttää admin-linkki, mutta admin-paneeli pyytää admin-koodia, jos `ADMIN_ACCESS_KEY` on asetettu.
-- Admin-paneeli pyytää admin-koodia, jos `ADMIN_ACCESS_KEY` on asetettu `.env`-tiedostoon.
-- Paikallisessa kehityksessä admin voi avautua ilman koodia, jos `ADMIN_ACCESS_KEY` puuttuu ja pyyntö tulee localhostista.
-- Julkisessa asennuksessa admin-koodi vaaditaan ennen Spotify OAuth -kirjautumisen tai Spotify-asetusten avaamista.
+- The guest view may show an admin link, but the admin panel requests an admin key when `ADMIN_ACCESS_KEY` is set.
+- The admin panel always requests the admin key when `ADMIN_ACCESS_KEY` is present in `.env`.
+- During local development, the admin panel can open without a key when `ADMIN_ACCESS_KEY` is missing and the request comes from localhost.
+- In a public deployment, an admin key is required before Spotify OAuth login or Spotify settings can be opened.
 
-Pysyvä data:
+Persistent data:
 
-- `DATABASE_PATH` määrittää SQLite-tietokannan sijainnin.
-- SQLiteen tallennetaan kutsulinkki, PIN-hash, vieraiden kutsuoikeusasetus, aktiivinen toivejono, vieraat ja heidän järjestyksensä, manuaalinen jonojärjestys, estetyt vieras-ID:t, adminin kiinnitetyt soittolistat, vieraiden tallennetut Spotify-listat ja soitettujen kappaleiden loki. Soitettujen kappaleiden loki on palvelinpuolen append-only-loki, eikä sovellus tyhjennä sitä automaattisesti. Admin-paneelista voi viedä koko lokin tai valitun päivämäärävälin Excel-yhteensopivana CSV-tiedostona, joka sisältää toivojan nimen ja tyypin, jam-tunnisteen sekä UTC- ja palvelimen paikallisen ajan. `playback_observed` tarkoittaa, että EasyJam havaitsi kappaleen alkaneen; se ei takaa, että kappale soitettiin loppuun.
-- Spotify OAuth -access tokenit ovat edelleen muistissa, joten backend-restartin jälkeen admin kirjautuu Spotifyyn uudelleen.
+- `DATABASE_PATH` controls the location of the SQLite database.
+- SQLite stores the invite link, PIN hash, guest access setting, active queue, guests and their order, manual queue ordering, blocked guest IDs, admin-pinned playlists, guests' saved Spotify playlists, and the playback history. Playback history is an append-only server-side log and is not cleared automatically. The admin panel can export the full log or a selected date range as an Excel-compatible CSV containing the requester name and type, jam ID, and UTC and server-local timestamps. `playback_observed` means EasyJam detected that a track started; it does not guarantee that the track finished.
+- Spotify OAuth access tokens are still held in memory, so the admin must sign in to Spotify again after a backend restart.
 
-OAuth-asetuksista:
+OAuth settings:
 
-- `SPOTIFY_REDIRECT_URI` on pakollinen, koska Spotify palauttaa isännän kirjautumisen jälkeen tähän backend-reittiin.
-- `FRONTEND_URL` on sisäinen fallback redirecteihin. Admin-lomake laskee sen automaattisesti nykyisestä osoitteesta, eikä käyttäjän tarvitse täyttää sitä.
+- `SPOTIFY_REDIRECT_URI` is required because Spotify returns the host to this backend route after login.
+- `FRONTEND_URL` is an internal fallback for redirects. The admin form derives it automatically from the current address, so users do not need to fill it in.
 
-## Toteutetut ominaisuudet
+## Features
 
-- Spotify Authorization Code Flow isännälle.
-- Vieraiden localStorage-UUID ja kirjautumaton käyttö.
-- Debouncattu Spotify-haku.
-- Soittolistan linkitys, localStorage-muisti ja selaus.
-- TuneMyMusic CSV/TXT -tuonti vierasnäkymässä: CSV:n Spotify ID:t käytetään suoraan ja TXT:n `Artist - Track` -rivit haetaan Spotify Searchilla.
-- Kiinnitetyt soittolistat adminilta vieraiden etusivulle.
-- Recommendations-endpointiin perustuvat ehdotukset oman jonon perusteella.
-- Round-robin-jonon muodostus käyttäjäkohtaisista jonoista.
-- Spotify-soittolistan täysi synkronointi jokaisen lisäyksen, poiston ja admin-järjestelyn jälkeen.
-- Admin-paneelin drag-and-drop-manuaalijärjestys ja poistot.
-- Admin-paneelin vieraslista, viimeisen 90 sekunnin aktiivisuustila sekä vieraskohtainen tai kaikkien vieraiden poistaminen. Poisto tyhjentää vieraan jonotoiveet eikä ole esto; vieras voi liittyä takaisin voimassa olevalla kutsulla. Erillisellä estotoiminnolla vieras voidaan estää, ja esto voidaan poistaa admin-paneelista.
-- React i18n suomeksi ja englanniksi, kielivalinta localStoragessa.
-- QR + PIN -kutsumalli: `/join/<token>` vaaditaan aina vieraskäyttöön; admin voi ottaa asetetun PIN-kyselyn käyttöön tai pois käytöstä.
-- JAM Screenin QR-koodi näytetään vain kutsuvaltuutetussa näkymässä; avaa se vierasnäkymän JAM Screen -painikkeesta.
-- SQLite-pysyvyys kutsuasetuksille, live-jonolle, vieraille ja estoille, tallennetuille soittolistoille sekä palvelimella säilyvälle soitettujen kappaleiden lokille.
+- Spotify Authorization Code Flow for the host.
+- Guest browser UUIDs and login-free access.
+- Debounced Spotify search.
+- Playlist linking, localStorage persistence, and browsing.
+- TuneMyMusic CSV/TXT import in the guest view: Spotify IDs from CSV files are used directly, while `Artist - Track` rows from TXT files are resolved through Spotify Search.
+- Admin-pinned playlists displayed on the guest home page.
+- Recommendations based on the guest's own queue.
+- Round-robin queue construction from per-user queues.
+- Full Spotify playlist synchronization after every guest addition, removal, and admin reorder.
+- Drag-and-drop manual ordering and removal in the admin panel.
+- An admin guest list, activity within the last 90 seconds, and removal of individual guests or all guests. Removal clears a guest's requests but does not block them; they can rejoin with a valid invite. A separate block action prevents rejoining, and blocks can be removed from the admin panel.
+- React i18n in Finnish and English, with the language preference stored in localStorage.
+- QR + PIN invite flow: `/join/<token>` is always required for guest access; the admin can enable or disable the configured PIN requirement.
+- The JAM Screen QR code is shown only in an invite-authorized view; open it with the JAM Screen button in the guest view.
+- SQLite persistence for invite settings, the live queue, guests and blocks, saved playlists, and the server-side playback history.
 
 ## Homelab / Tailscale
 
-Suositeltu suljettu julkaisutapa on ajaa EasyJam homelabin k3s-klusterissa ja julkaista se Tailscalen sisäiseen tailnetiin. Tällöin vieraat pääsevät sovellukseen vain, jos he ovat Tailscale-verkossa tai heille on jaettu Tailscale Serve/Funnel -pääsy.
+The recommended private deployment is to run EasyJam in a homelab k3s cluster and publish it to a private Tailscale tailnet. Guests can then access the app only when they are on the Tailscale network or have been granted Tailscale Serve/Funnel access.
 
-Päivitetyn version viemiseen homelabiin on oma ohje: [docs/HOMELAB_UPDATE.md](docs/HOMELAB_UPDATE.md).
+See [docs/HOMELAB_UPDATE.md](docs/HOMELAB_UPDATE.md) for instructions on deploying an updated version to a homelab.
 
-Tärkeät ympäristöarvot homelabissa:
+Important homelab environment values:
 
 ```env
 PORT=5050
@@ -86,22 +86,22 @@ SPOTIFY_REDIRECT_URI=https://easyjam.example.com/api/auth/callback
 ADMIN_ACCESS_KEY=<pitka-admin-salasana>
 ```
 
-Spotify Developer Dashboardiin pitää lisätä täsmälleen sama Redirect URI kuin `SPOTIFY_REDIRECT_URI`.
+Add exactly the same Redirect URI as `SPOTIFY_REDIRECT_URI` to the Spotify Developer Dashboard.
 
-Jos päädomain on jo toisen palvelun käytössä, EasyJam kannattaa julkaista erillisessä Tailscale Serve HTTPS -portissa:
+If the main domain is already used by another service, publish EasyJam on a separate Tailscale Serve HTTPS port:
 
 ```bash
 sudo tailscale serve --bg --https=8443 http://127.0.0.1:30050
 ```
 
-Tällöin EasyJamin osoite on:
+The EasyJam address will then be:
 
 ```text
 https://your-tailnet-host.ts.net:8443
 ```
 
-## Spotify API -huomio
+## Spotify API notes
 
-Spotify on merkinnyt Recommendations-endpointin deprekoiduksi. Toteutus kutsuu endpointia pyydetysti, mutta backend käyttää Search API -fallbackia, jos Spotify ei salli Recommendations-kutsua.
+Spotify has marked the Recommendations endpoint as deprecated. The app still calls it where requested, but the backend falls back to the Search API if Spotify does not allow Recommendations requests.
 
-Julkisten soittolistojen selaus tapahtuu isännän OAuth-tokenilla. Jos Spotify rajoittaa tietyn soittolistan näkyvyyttä API:ssa, sovellus palauttaa Spotifyn virheen UI:hin.
+Public playlist browsing uses the host's OAuth token. If Spotify restricts a playlist's visibility through the API, the app surfaces Spotify's error in the UI.
