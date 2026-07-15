@@ -41,6 +41,7 @@ setInterval(() => {
 }, 10_000).unref();
 
 setInterval(() => {
+  if (!config.easyJamEnabled) return;
   refreshPinnedPlaylists()
     .then((result) => (result.changed ? savePinnedPlaylists() : null))
     .catch((error) => {

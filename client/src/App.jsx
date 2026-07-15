@@ -23,10 +23,12 @@ import {
   ListMusic,
   LogOut,
   Lock,
+  Pause,
   Download,
   FileUp,
   Play,
   Pencil,
+  Power,
   Plus,
   Check,
   LoaderCircle,
@@ -34,6 +36,8 @@ import {
   Radio,
   Search,
   Settings,
+  SkipBack,
+  SkipForward,
   Trash2,
   User,
   Users,
@@ -88,6 +92,38 @@ function formatDateTime(value) {
     dateStyle: 'short',
     timeStyle: 'short'
   }).format(date);
+}
+
+function formatDiagnosticDateTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+
+  return new Intl.DateTimeFormat(i18n.language, {
+    dateStyle: 'short',
+    timeStyle: 'medium'
+  }).format(date);
+}
+
+function formatSpotifyRequestDetails(diagnostic, t) {
+  if (!diagnostic) return '—';
+  const parts = [];
+  if (diagnostic.origin) parts.push(t(`spotifyRequestOrigin_${diagnostic.origin}`));
+  if (Number.isFinite(diagnostic.trackCount)) {
+    parts.push(t('spotifyRequestTrackCount', { count: diagnostic.trackCount }));
+  }
+  if (diagnostic.targetTrackUri) parts.push(`→ ${diagnostic.targetTrackUri}`);
+  if (diagnostic.firstTrackUri) parts.push(`1: ${diagnostic.firstTrackUri}`);
+  if (diagnostic.lastTrackUri) parts.push(`last: ${diagnostic.lastTrackUri}`);
+  if (Number.isFinite(diagnostic.observedTrackCount)) {
+    parts.push(t('spotifyRequestObservedTrackCount', { count: diagnostic.observedTrackCount }));
+  }
+  if (diagnostic.observedFirstTrackUri) parts.push(`Spotify 1: ${diagnostic.observedFirstTrackUri}`);
+  if (diagnostic.observedLastTrackUri) parts.push(`Spotify last: ${diagnostic.observedLastTrackUri}`);
+  if (diagnostic.verified === true) parts.push(t('spotifyRequestVerified'));
+  if (diagnostic.verified === false) parts.push(t('spotifyRequestMismatch'));
+  if (diagnostic.chunk) parts.push(`chunk ${diagnostic.chunk}`);
+  return parts.join(' · ') || '—';
 }
 
 function useLanguage() {
@@ -2398,6 +2434,7 @@ function AdminSpotifyRequestLog() {
   const [maxEntries, setMaxEntries] = useState(200);
   const [rateLimitedUntil, setRateLimitedUntil] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState('');
 
   async function loadRequestLog() {
@@ -2428,6 +2465,26 @@ function AdminSpotifyRequestLog() {
     }
   }
 
+  async function exportRequestLog() {
+    setExporting(true);
+    setError('');
+    try {
+      const result = await api.exportSpotifyRequestLog();
+      const url = URL.createObjectURL(result.blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = result.filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setExporting(false);
+    }
+  }
+
   useEffect(() => {
     loadRequestLog();
   }, []);
@@ -2451,6 +2508,10 @@ function AdminSpotifyRequestLog() {
             <RefreshCcw size={16} />
             {t('refresh')}
           </button>
+          <button type="button" onClick={exportRequestLog} disabled={exporting || !requests.length}>
+            <Download size={16} />
+            {t('exportSpotifyRequestLog')}
+          </button>
           <button type="button" onClick={clearRequestLog} disabled={loading || !requests.length}>
             <Trash2 size={16} />
             {t('clear')}
@@ -2465,6 +2526,8 @@ function AdminSpotifyRequestLog() {
               <tr>
                 <th>{t('time')}</th>
                 <th>{t('request')}</th>
+                <th>{t('reason')}</th>
+                <th>{t('details')}</th>
                 <th>{t('result')}</th>
                 <th>{t('duration')}</th>
               </tr>
@@ -2472,8 +2535,10 @@ function AdminSpotifyRequestLog() {
             <tbody>
               {requests.map((entry) => (
                 <tr key={entry.id} className={`spotify-request-${entry.outcome}`}>
-                  <td>{formatDateTime(entry.at)}</td>
+                  <td>{formatDiagnosticDateTime(entry.at)}</td>
                   <td><code>{entry.method} {entry.path}</code></td>
+                  <td>{t(`spotifyRequestReason_${entry.reason ?? 'unknown'}`)}</td>
+                  <td className="spotify-request-details">{formatSpotifyRequestDetails(entry.diagnostic, t)}</td>
                   <td>
                     {entry.status ? `HTTP ${entry.status}` : '—'} · {t(`spotifyRequestOutcome_${entry.outcome}`)}
                     {entry.retryAfterSeconds ? ` (${entry.retryAfterSeconds}s)` : ''}
@@ -2829,11 +2894,83 @@ function AdminAccessGate({ onUnlocked }) {
   );
 }
 
+function PlaybackDevicePicker({ open, mode, devices, selectedDeviceId, loading, onSelect, onRefresh, onCancel, onConfirm }) {
+  const { t } = useTranslation();
+  if (!open) return null;
+
+  return createPortal(
+    <div
+      className="playback-device-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !loading) onCancel();
+      }}
+    >
+      <section className="playback-device-dialog" role="dialog" aria-modal="true" aria-labelledby="playback-device-title">
+        <div className="playlist-import-heading">
+          <div>
+            <div className="panel-title" id="playback-device-title">
+              <Radio size={18} />
+              {mode === 'switch' ? t('switchPlaybackDevice') : t('choosePlaybackDevice')}
+            </div>
+            <p className="muted">{t('choosePlaybackDeviceHelp')}</p>
+          </div>
+          <button
+            className="icon-button close-button"
+            type="button"
+            onClick={onCancel}
+            disabled={loading}
+            aria-label={t('close')}
+            title={t('close')}
+          >
+            <X size={17} aria-hidden="true" />
+          </button>
+        </div>
+        {devices.length ? (
+          <div className="playback-device-list" role="radiogroup" aria-label={t('choosePlaybackDevice')}>
+            {devices.map((device) => (
+              <button
+                key={device.id}
+                className={`playback-device-option ${selectedDeviceId === device.id ? 'is-selected' : ''}`}
+                type="button"
+                role="radio"
+                aria-checked={selectedDeviceId === device.id}
+                onClick={() => onSelect(device.id)}
+                disabled={loading}
+              >
+                <span>
+                  <strong>{device.name}</strong>
+                  <small>{device.type}{device.isActive ? ` · ${t('deviceActive')}` : ''}</small>
+                </span>
+                <span className="playback-device-indicator" aria-hidden="true" />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="playback-device-empty">{t('noPlaybackDevices')}</p>
+        )}
+        <div className="playback-device-actions">
+          <button type="button" onClick={onRefresh} disabled={loading} title={t('refreshDevices')}>
+            <RefreshCcw size={16} aria-hidden="true" />
+            {t('refreshDevices')}
+          </button>
+          <button type="button" onClick={onConfirm} disabled={loading || !selectedDeviceId}>
+            <Power size={16} aria-hidden="true" />
+            {mode === 'switch' ? t('switchPlaybackDevice') : t('enableEasyJam')}
+          </button>
+        </div>
+      </section>
+    </div>,
+    document.body
+  );
+}
+
 function AdminApp() {
   const { t, toggleLanguage } = useLanguage();
   const [status, setStatus] = useState(null);
   const [queue, setQueue] = useState([]);
   const [current, setCurrent] = useState(null);
+  const [seekPosition, setSeekPosition] = useState(0);
   const [pinInput, setPinInput] = useState('');
   const [selectedPinnedPlaylist, setSelectedPinnedPlaylist] = useState(null);
   const [error, setError] = useState('');
@@ -2844,6 +2981,15 @@ function AdminApp() {
     const url = new URL(window.location.href);
     return url.searchParams.get('setup') === 'spotify';
   });
+  const [devicePickerOpen, setDevicePickerOpen] = useState(false);
+  const [playbackDevices, setPlaybackDevices] = useState([]);
+  const [selectedPlaybackDeviceId, setSelectedPlaybackDeviceId] = useState('');
+  const [loadingPlaybackDevices, setLoadingPlaybackDevices] = useState(false);
+  const [devicePickerMode, setDevicePickerMode] = useState('enable');
+
+  useEffect(() => {
+    setSeekPosition(current?.progressMs ?? 0);
+  }, [current?.track?.id]);
   const [accessUnlocked, setAccessUnlocked] = useState(false);
 
   useEffect(() => {
@@ -3008,11 +3154,77 @@ function AdminApp() {
     );
   }
 
+  async function setEasyJamEnabled(enabled, deviceId = null) {
+    await runAdminAction(
+      'easyJamEnabled',
+      () => api.setEasyJamEnabled(enabled, deviceId)
+    );
+  }
+
+  async function loadPlaybackDevices(preferredDeviceId = '') {
+    setLoadingPlaybackDevices(true);
+    setError('');
+    try {
+      const result = await api.playbackDevices();
+      const devices = result.devices ?? [];
+      setPlaybackDevices(devices);
+      setSelectedPlaybackDeviceId((currentId) => {
+        const candidateId = preferredDeviceId || currentId;
+        return devices.some((device) => device.id === candidateId)
+          ? candidateId
+          : devices.find((device) => device.isActive)?.id ?? devices[0]?.id ?? ''
+      });
+    } catch (err) {
+      setError(err.message);
+      setPlaybackDevices([]);
+      setSelectedPlaybackDeviceId('');
+    } finally {
+      setLoadingPlaybackDevices(false);
+    }
+  }
+
+  async function openPlaybackDevicePicker(mode = 'enable') {
+    setDevicePickerMode(mode);
+    const preferredDeviceId = status?.host?.playbackDevice?.id ?? '';
+    setSelectedPlaybackDeviceId(preferredDeviceId);
+    setDevicePickerOpen(true);
+    await loadPlaybackDevices(preferredDeviceId);
+  }
+
+  async function confirmEasyJamEnable() {
+    if (!selectedPlaybackDeviceId) return;
+    if (devicePickerMode === 'switch') {
+      await runAdminAction(
+        'playbackDevice',
+        () => api.setPlaybackDevice(selectedPlaybackDeviceId)
+      );
+    } else {
+      await setEasyJamEnabled(true, selectedPlaybackDeviceId);
+    }
+    setDevicePickerOpen(false);
+  }
+
   async function setHandoffLead(handoffLeadMs) {
     await runAdminAction(
       'handoffLead',
       () => api.setHandoffLead(handoffLeadMs)
     );
+  }
+
+  async function setPlaybackControlMode(mode) {
+    await runAdminAction('playbackControlMode', () => api.setPlaybackControlMode(mode));
+  }
+
+  async function pausePlayback() {
+    await runAdminAction('pausePlayback', () => api.pausePlayback());
+  }
+
+  async function skipPlayback(direction) {
+    await runAdminAction(`skipPlayback-${direction}`, () => api.skipPlayback(direction));
+  }
+
+  async function seekPlayback(positionMs) {
+    await runAdminAction('seekPlayback', () => api.seekPlayback(positionMs));
   }
 
   async function pinPlaylist(event) {
@@ -3067,6 +3279,48 @@ function AdminApp() {
           </div>
         </div>
         <div className="topbar-actions">
+          {authenticated ? (
+            <>
+            <button
+              className={`jam-power-switch ${status?.host?.easyJamEnabled ? 'is-on' : 'is-off'}`}
+              type="button"
+              role="switch"
+              aria-checked={Boolean(status?.host?.easyJamEnabled)}
+              aria-label={t('easyJamEnabled')}
+              title={t('easyJamEnabledHelp')}
+              onClick={() => {
+                if (status?.host?.easyJamEnabled) {
+                  void setEasyJamEnabled(false);
+                } else {
+                  void openPlaybackDevicePicker('enable');
+                }
+              }}
+              disabled={Boolean(busyAction)}
+            >
+              <Power size={17} aria-hidden="true" />
+              <span className="jam-power-copy">
+                <small>EasyJAM</small>
+                <strong>{status?.host?.easyJamEnabled ? t('easyJamOn') : t('easyJamOff')}</strong>
+              </span>
+              <span className="jam-power-track" aria-hidden="true">
+                <span className="jam-power-knob" />
+              </span>
+            </button>
+            {status?.host?.easyJamEnabled ? (
+              <button
+                className="jam-device-button"
+                type="button"
+                onClick={() => void openPlaybackDevicePicker('switch')}
+                disabled={Boolean(busyAction)}
+                title={t('changePlaybackDevice')}
+                aria-label={t('changePlaybackDevice')}
+              >
+                <Radio size={16} aria-hidden="true" />
+                <span>{status?.host?.playbackDevice?.name ?? t('changePlaybackDevice')}</span>
+              </button>
+            ) : null}
+            </>
+          ) : null}
           <a className="ghost-link" href="/">
             {t('guestLink')}
           </a>
@@ -3081,6 +3335,18 @@ function AdminApp() {
           </button>
         </div>
       </header>
+
+      <PlaybackDevicePicker
+        open={devicePickerOpen}
+        mode={devicePickerMode}
+        devices={playbackDevices}
+        selectedDeviceId={selectedPlaybackDeviceId}
+        loading={loadingPlaybackDevices || busyAction === 'easyJamEnabled'}
+        onSelect={setSelectedPlaybackDeviceId}
+        onRefresh={() => void loadPlaybackDevices()}
+        onCancel={() => setDevicePickerOpen(false)}
+        onConfirm={() => void confirmEasyJamEnable()}
+      />
 
       {!authenticated && (spotifyConfigured === false || showSpotifySetup) ? (
         <SpotifySetupForm
@@ -3154,18 +3420,6 @@ function AdminApp() {
           </div>
 
           <div className="admin-main">
-          <AdminGuests
-            guests={status?.guests}
-            busy={busyAction}
-            onKick={kickGuest}
-            onKickAll={kickAllGuests}
-            onBan={banGuest}
-          />
-          <BannedGuests
-            guests={status?.bannedGuests}
-            busy={busyAction}
-            onUnban={unbanGuest}
-          />
           <section className="panel host-controls">
             <div className="panel-title">
               <Settings size={18} />
@@ -3180,14 +3434,48 @@ function AdminApp() {
               <RefreshCcw size={16} />
               {t('sync')}
             </button>
-            <button
-              type="button"
-              onClick={startPlayback}
-              disabled={Boolean(busyAction)}
-            >
-              <Play size={16} />
-              {t('startPlayback')}
-            </button>
+            <div className="player-control-group" aria-label={t('playerControls')}>
+              <button
+                className="player-control"
+                type="button"
+                onClick={() => skipPlayback('previous')}
+                disabled={Boolean(busyAction)}
+                title={t('previousTrack')}
+                aria-label={t('previousTrack')}
+              >
+                <SkipBack size={20} aria-hidden="true" />
+              </button>
+              <button
+                className="player-control player-control-primary"
+                type="button"
+                onClick={startPlayback}
+                disabled={Boolean(busyAction)}
+                title={t('startPlayback')}
+                aria-label={t('startPlayback')}
+              >
+                <Play size={22} fill="currentColor" aria-hidden="true" />
+              </button>
+              <button
+                className="player-control"
+                type="button"
+                onClick={pausePlayback}
+                disabled={Boolean(busyAction)}
+                title={t('pausePlayback')}
+                aria-label={t('pausePlayback')}
+              >
+                <Pause size={20} fill="currentColor" aria-hidden="true" />
+              </button>
+              <button
+                className="player-control"
+                type="button"
+                onClick={() => skipPlayback('next')}
+                disabled={Boolean(busyAction)}
+                title={t('nextTrack')}
+                aria-label={t('nextTrack')}
+              >
+                <SkipForward size={20} aria-hidden="true" />
+              </button>
+            </div>
             <button
               type="button"
               onClick={applyQueueMode}
@@ -3209,6 +3497,44 @@ function AdminApp() {
               <span className="status-pill">{t('manualLocked')}</span>
             ) : null}
             </div>
+            <label className="setting-row">
+              <span>
+                <strong>{t('playbackControlMode')}</strong>
+                <small>{t('playbackControlModeHelp')}</small>
+              </span>
+              <select
+                value={status?.host?.playbackControlMode ?? 'external'}
+                onChange={(event) => setPlaybackControlMode(event.target.value)}
+                disabled={Boolean(busyAction)}
+              >
+                <option value="external">{t('playbackModeExternal')}</option>
+                <option value="easyjam">{t('playbackModeEasyJam')}</option>
+              </select>
+            </label>
+            <label className="setting-row setting-row-range">
+              <span>
+                <strong>{t('seekPlayback')}</strong>
+                <small>{current?.track ? current.track.name : t('noTrack')}</small>
+              </span>
+              <span className="range-control">
+                <input
+                  type="range"
+                  min="0"
+                  max={current?.track?.durationMs ?? 0}
+                  step="1000"
+                  value={Math.min(current?.progressMs ?? 0, current?.track?.durationMs ?? 0)}
+                  onChange={(event) => setSeekPosition(Number(event.target.value))}
+                  disabled={!current?.track || Boolean(busyAction)}
+                />
+                <button
+                  type="button"
+                  onClick={() => seekPlayback(seekPosition)}
+                  disabled={!current?.track || Boolean(busyAction)}
+                >
+                  {t('seekPlayback')}
+                </button>
+              </span>
+            </label>
             <label className="setting-row">
               <span>
                 <strong>{t('queueMode')}</strong>
@@ -3274,6 +3600,19 @@ function AdminApp() {
             </div>
             <AdminQueue queue={queue} setQueue={setQueue} onRemove={removeAny} />
           </section>
+
+          <AdminGuests
+            guests={status?.guests}
+            busy={busyAction}
+            onKick={kickGuest}
+            onKickAll={kickAllGuests}
+            onBan={banGuest}
+          />
+          <BannedGuests
+            guests={status?.bannedGuests}
+            busy={busyAction}
+            onUnban={unbanGuest}
+          />
 
           <AdminPlaybackHistory />
 

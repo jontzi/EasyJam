@@ -266,6 +266,94 @@ a {
   gap: 9px;
 }
 
+.jam-power-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 48px;
+  padding: 6px 8px 6px 12px;
+  border-radius: 14px;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--muted);
+  text-align: left;
+}
+
+.jam-power-switch.is-on {
+  border-color: rgba(30, 215, 96, 0.46);
+  background: rgba(30, 215, 96, 0.12);
+  color: var(--green-hot);
+}
+
+.jam-power-copy {
+  display: grid;
+  min-width: 54px;
+  gap: 1px;
+  line-height: 1.05;
+}
+
+.jam-power-copy small {
+  color: inherit;
+  font-size: 0.67rem;
+  font-weight: 720;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.jam-power-copy strong {
+  color: var(--ink);
+  font-size: 0.84rem;
+}
+
+.jam-power-switch.is-on .jam-power-copy strong {
+  color: var(--green-hot);
+}
+
+.jam-power-track {
+  display: inline-flex;
+  align-items: center;
+  width: 36px;
+  height: 22px;
+  padding: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  transition: background 160ms ease;
+}
+
+.jam-power-knob {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #c8d0ca;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  transition: transform 160ms ease, background 160ms ease;
+}
+
+.jam-power-switch.is-on .jam-power-track {
+  background: var(--green);
+}
+
+.jam-power-switch.is-on .jam-power-knob {
+  background: #062b15;
+  transform: translateX(14px);
+}
+
+.jam-device-button {
+  min-width: 44px;
+  max-width: 180px;
+  min-height: 48px;
+  padding-inline: 12px;
+  border-color: rgba(30, 215, 96, 0.3);
+  background: rgba(30, 215, 96, 0.08);
+  color: var(--green-hot);
+}
+
+.jam-device-button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .brand {
   color: var(--ink);
   font-size: 1.22rem;
@@ -1641,6 +1729,52 @@ h2.section-label {
   min-height: 50px;
 }
 
+.host-controls .toolbar .player-control-group {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 64px;
+  padding: 4px 0 8px;
+}
+
+.host-controls .toolbar .player-control {
+  display: inline-grid;
+  width: 48px;
+  min-width: 48px;
+  height: 48px;
+  min-height: 48px;
+  padding: 0;
+  place-items: center;
+  border-radius: 999px;
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.075);
+  color: var(--ink);
+}
+
+.host-controls .toolbar .player-control:hover {
+  border-color: rgba(30, 215, 96, 0.58);
+  background: rgba(30, 215, 96, 0.14);
+  color: var(--green-hot);
+}
+
+.host-controls .toolbar .player-control-primary {
+  width: 58px;
+  min-width: 58px;
+  height: 58px;
+  min-height: 58px;
+  border-color: rgba(30, 215, 96, 0.72);
+  background: linear-gradient(180deg, var(--green-hot), var(--green));
+  color: var(--green-ink);
+  box-shadow: 0 10px 24px rgba(30, 215, 96, 0.18);
+}
+
+.host-controls .toolbar .player-control-primary:hover {
+  background: linear-gradient(180deg, #64ff91, var(--green-hot));
+  color: var(--green-ink);
+}
+
 .host-controls .toolbar .apply-queue-mode-button {
   grid-column: 1 / -1;
 }
@@ -1680,6 +1814,14 @@ h2.section-label {
 .admin-main,
 .admin-side {
   min-width: 0;
+}
+
+.admin-main .host-controls {
+  order: -2;
+}
+
+.admin-main .admin-queue-panel {
+  order: -1;
 }
 
 .admin-queue-panel {
@@ -1797,7 +1939,7 @@ h2.section-label {
 
 .spotify-request-log {
   width: 100%;
-  min-width: 680px;
+  min-width: 1080px;
   border-collapse: collapse;
   font-size: 0.78rem;
 }
@@ -1820,6 +1962,14 @@ h2.section-label {
 .spotify-request-log code {
   font-size: 0.74rem;
   white-space: nowrap;
+}
+
+.spotify-request-details {
+  min-width: 260px;
+  color: var(--muted);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
 }
 
 .spotify-request-rate_limited td,
@@ -1933,6 +2083,10 @@ h2.section-label {
   }
 
   .host-controls .toolbar .apply-queue-mode-button {
+    grid-column: auto;
+  }
+
+  .host-controls .toolbar .player-control-group {
     grid-column: auto;
   }
 
@@ -2243,6 +2397,89 @@ h2.section-label {
 
 .playlist-import-dialog .feedback {
   margin-top: 1rem;
+}
+
+.playback-device-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(3 7 6 / 78%);
+}
+
+.playback-device-dialog {
+  width: min(100%, 32rem);
+  max-height: calc(100svh - 2rem);
+  overflow: auto;
+  padding: clamp(1.25rem, 4vw, 2rem);
+  border: 1px solid rgba(30, 215, 96, 0.3);
+  border-radius: 1.25rem;
+  background: var(--surface-strong, #121b18);
+  box-shadow: 0 1.5rem 4rem rgb(0 0 0 / 45%);
+}
+
+.playback-device-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.playback-device-option {
+  display: flex;
+  width: 100%;
+  min-height: 62px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 13px;
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.035);
+  text-align: left;
+}
+
+.playback-device-option > span:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.playback-device-option small,
+.playback-device-empty {
+  color: var(--muted);
+}
+
+.playback-device-option.is-selected {
+  border-color: rgba(30, 215, 96, 0.7);
+  background: rgba(30, 215, 96, 0.12);
+}
+
+.playback-device-indicator {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.42);
+  border-radius: 50%;
+}
+
+.playback-device-option.is-selected .playback-device-indicator {
+  border-color: var(--green-hot);
+  box-shadow: inset 0 0 0 3px var(--surface-strong), inset 0 0 0 9px var(--green-hot);
+}
+
+.playback-device-empty {
+  margin: 22px 0;
+}
+
+.playback-device-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.playback-device-actions button:last-child {
+  border-color: rgba(30, 215, 96, 0.72);
+  background: linear-gradient(180deg, var(--green-hot), var(--green));
+  color: var(--green-ink);
 }
 
 @media (max-width: 639px) {

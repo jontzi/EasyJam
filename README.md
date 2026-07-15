@@ -5,7 +5,7 @@ Node.js + React app where the host connects to Spotify and guests add tracks wit
 ## Getting started
 
 1. Copy `.env.example` to `.env`.
-2. Create an app in the Spotify Developer Dashboard and add this Redirect URI: `http://localhost:5050/api/auth/callback`.
+2. Create an app in the Spotify Developer Dashboard and add this local-development Redirect URI: `http://127.0.0.1:5050/api/auth/callback`. For production, use the exact HTTPS callback configured in `SPOTIFY_REDIRECT_URI` (for example, `https://jam.jnas.fi/api/auth/callback`).
 3. Set `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env`.
 4. Install dependencies and start the app:
 

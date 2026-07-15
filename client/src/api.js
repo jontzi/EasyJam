@@ -206,6 +206,19 @@ export const api = {
       admin: true,
       body: { enabled }
     }),
+  playbackDevices: () => request('/api/admin/playback/devices', { admin: true }),
+  setPlaybackDevice: (deviceId) =>
+    request('/api/admin/playback/device', {
+      method: 'POST',
+      admin: true,
+      body: { deviceId }
+    }),
+  setEasyJamEnabled: (enabled, deviceId = null) =>
+    request('/api/admin/easyjam-enabled', {
+      method: 'POST',
+      admin: true,
+      body: { enabled, ...(deviceId ? { deviceId } : {}) }
+    }),
   setHandoffLead: (handoffLeadMs) =>
     request('/api/admin/handoff-lead', {
       method: 'POST',
@@ -234,11 +247,33 @@ export const api = {
       method: 'POST',
       admin: true
     }),
+  pausePlayback: () =>
+    request('/api/admin/playback/pause', { method: 'POST', admin: true }),
+  skipPlayback: (direction = 'next') =>
+    request('/api/admin/playback/skip', {
+      method: 'POST',
+      admin: true,
+      body: { direction }
+    }),
+  seekPlayback: (positionMs) =>
+    request('/api/admin/playback/seek', {
+      method: 'POST',
+      admin: true,
+      body: { positionMs }
+    }),
+  setPlaybackControlMode: (mode) =>
+    request('/api/admin/playback-control-mode', {
+      method: 'POST',
+      admin: true,
+      body: { mode }
+    }),
   playbackHistory: () =>
     request('/api/admin/playback/history?limit=100', {
       admin: true
     }),
   spotifyRequestLog: () => request('/api/admin/spotify/request-log', { admin: true }),
+  exportSpotifyRequestLog: () =>
+    requestBlob('/api/admin/spotify/request-log/export', { admin: true }),
   clearSpotifyRequestLog: () =>
     request('/api/admin/spotify/request-log', {
       method: 'DELETE',

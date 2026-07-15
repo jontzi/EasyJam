@@ -98,6 +98,7 @@ export async function initStorage() {
   const leaderboardResetAt = await readJsonState('leaderboardResetAt', null);
   const hostPlaylistId = await readJsonState('hostPlaylistId', null);
   const autoStartPlayback = await readJsonState('autoStartPlayback', null);
+  const playbackControlMode = await readJsonState('playbackControlMode', null);
   const handoffLeadMs = await readJsonState('handoffLeadMs', null);
   const livePartyState = await readJsonState('livePartyState', null);
   const playbackHistory = await getPlayedTrackLog({ limit: 100 });
@@ -117,6 +118,12 @@ export async function initStorage() {
   } else {
     config.autoStartPlayback = true;
   }
+  // Device IDs are not guaranteed to remain valid, so an admin must select a
+  // Spotify Connect target and explicitly enable EasyJAM after every restart.
+  config.easyJamEnabled = false;
+  if (playbackControlMode === 'easyjam' || playbackControlMode === 'external') {
+    config.playbackControlMode = playbackControlMode;
+  }
   if (typeof handoffLeadMs === 'number' && Number.isFinite(handoffLeadMs)) {
     config.handoffLeadMs = Math.min(Math.max(Math.round(Number(handoffLeadMs) / 500) * 500, 0), 10_000);
   }
@@ -126,6 +133,9 @@ export async function initStorage() {
   if (!randomFallback) await saveRandomFallbackState();
   if (!hostPlaylistId && partyState.host.playlistId) await saveHostPlaylistState();
   if (typeof autoStartPlayback !== 'boolean') await saveAutoStartPlaybackState();
+  if (playbackControlMode !== 'easyjam' && playbackControlMode !== 'external') {
+    await savePlaybackControlModeState();
+  }
   if (!(typeof handoffLeadMs === 'number' && Number.isFinite(handoffLeadMs))) {
     await saveHandoffLeadState();
   }
@@ -161,6 +171,10 @@ export async function saveHostPlaylistState() {
 
 export async function saveAutoStartPlaybackState() {
   await writeJsonState('autoStartPlayback', Boolean(config.autoStartPlayback));
+}
+
+export async function savePlaybackControlModeState() {
+  await writeJsonState('playbackControlMode', config.playbackControlMode);
 }
 
 export async function saveHandoffLeadState() {

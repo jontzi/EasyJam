@@ -11,12 +11,20 @@ export const config = {
   spotifyClientId: process.env.SPOTIFY_CLIENT_ID ?? '',
   spotifyClientSecret: process.env.SPOTIFY_CLIENT_SECRET ?? '',
   spotifyRedirectUri:
-    process.env.SPOTIFY_REDIRECT_URI ?? 'http://localhost:5050/api/auth/callback',
+    process.env.SPOTIFY_REDIRECT_URI ?? 'http://127.0.0.1:5050/api/auth/callback',
   spotifyPlaylistId: process.env.SPOTIFY_PLAYLIST_ID || null,
   adminAccessKey: process.env.ADMIN_ACCESS_KEY || null,
   autoStartPlayback: process.env.AUTO_START_PLAYBACK !== 'false',
+  easyJamEnabled: false,
+  playbackControlMode: 'external',
   handoffLeadMs: 2_000
 };
+
+export function setPlaybackControlMode(value) {
+  const normalized = value === 'easyjam' ? 'easyjam' : 'external';
+  config.playbackControlMode = normalized;
+  return normalized;
+}
 
 export function setHandoffLeadMs(value) {
   const normalized = Math.min(Math.max(Math.round(Number(value) / 500) * 500, 0), 10_000);
@@ -117,7 +125,6 @@ export async function saveAutoStartPlayback(enabled) {
 
 export const spotifyScopes = [
   'user-read-playback-state',
-  'user-read-currently-playing',
   'user-modify-playback-state',
   'playlist-modify-private',
   'playlist-modify-public',

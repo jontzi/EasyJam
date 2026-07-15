@@ -13,6 +13,7 @@ export const partyState = {
     playlistOwnerName: null,
     playlistPublic: null,
     playlistCollaborative: null,
+    playbackDevice: null,
     adminToken: null,
     oauthState: null
   },
@@ -37,6 +38,7 @@ export const partyState = {
   playback: {
     lastTrackId: null,
     currentItemId: null,
+    optimisticCompletion: null,
     history: []
   },
   leaderboardResetAt: null,
@@ -157,14 +159,15 @@ export function getGuests() {
       createdAt: guest.createdAt,
       lastActiveAt: guest.lastActiveAt,
       active: isGuestActive(guest, now),
-      queueCount: guest.queue.length
+      queueCount: guest.queue.filter((item) => !isOptimisticallyCompleted(item)).length
     }));
 }
 
 export function getRequestStats() {
+  const visibleQueue = getVisibleQueue();
   return {
-    total: partyState.playback.history.length + getCombinedQueue().length,
-    waiting: getCombinedQueue().length
+    total: partyState.playback.history.length + visibleQueue.length,
+    waiting: visibleQueue.length
   };
 }
 
@@ -173,7 +176,7 @@ export function getRequesterStats() {
   const leaderboardResetAt = Date.parse(partyState.leaderboardResetAt || '');
   const items = [
     ...partyState.playback.history,
-    ...getCombinedQueue().filter((item) => item.id !== partyState.playback.currentItemId)
+    ...getVisibleQueue().filter((item) => item.id !== partyState.playback.currentItemId)
   ];
 
   for (const item of items) {
@@ -537,6 +540,9 @@ export function removeItem(itemId, guestId = null) {
   if (partyState.playback.currentItemId === itemId) {
     partyState.playback.currentItemId = null;
   }
+  if (partyState.playback.optimisticCompletion?.itemId === itemId) {
+    partyState.playback.optimisticCompletion = null;
+  }
 
   return removed;
 }
@@ -588,6 +594,28 @@ export function getCombinedQueue() {
     ...manuallyPlaced,
     ...queueByMode.filter((item) => !manuallyPlacedIds.has(item.id))
   ];
+}
+
+function isOptimisticallyCompleted(item) {
+  return item?.id === partyState.playback.optimisticCompletion?.itemId;
+}
+
+export function getVisibleQueue() {
+  return getCombinedQueue().filter((item) => !isOptimisticallyCompleted(item));
+}
+
+export function beginOptimisticCompletion(previousTrackUri, expectedNextUri) {
+  if (!previousTrackUri || !expectedNextUri) return false;
+  const item = getCombinedQueue().find((candidate) => candidate.track?.uri === previousTrackUri);
+  if (!item) return false;
+
+  partyState.playback.optimisticCompletion = {
+    itemId: item.id,
+    previousTrackUri,
+    expectedNextUri,
+    createdAt: new Date().toISOString()
+  };
+  return true;
 }
 
 export function setQueueMode(queueMode) {
@@ -651,9 +679,12 @@ export function serializePlaybackItem(item) {
 }
 
 export function serializeQueues(guestId = null) {
+  const visibleQueue = getVisibleQueue();
   return {
-    queue: getCombinedQueue().map(serializeQueueItem),
-    mine: guestId ? getGuestQueue(guestId).map(serializeQueueItem) : [],
+    queue: visibleQueue.map(serializeQueueItem),
+    mine: guestId
+      ? getGuestQueue(guestId).filter((item) => !isOptimisticallyCompleted(item)).map(serializeQueueItem)
+      : [],
     history: partyState.playback.history.map(serializePlaybackItem),
     fallbackTracks: partyState.sync.fallbackTracks.map((track) => ({
       id: `fallback-${track.uri}`,
@@ -671,7 +702,15 @@ export function serializeQueues(guestId = null) {
 
 export function recordPlayback(currentPlayback) {
   const track = currentPlayback?.track;
-  if (!track?.id || partyState.playback.lastTrackId === track.id) {
+  if (!track?.id) {
+    return { changed: false, removedItem: null };
+  }
+  if (partyState.playback.lastTrackId === track.id) {
+    const optimisticCompletion = partyState.playback.optimisticCompletion;
+    if (optimisticCompletion && track.uri !== optimisticCompletion.expectedNextUri) {
+      partyState.playback.optimisticCompletion = null;
+      return { changed: true, removedItem: null, revertedOptimisticCompletion: true };
+    }
     return { changed: false, removedItem: null };
   }
 
@@ -681,15 +720,30 @@ export function recordPlayback(currentPlayback) {
   const isEasyJamPlayback = Boolean(
     easyJamContextUri && currentPlayback.contextUri === easyJamContextUri
   );
+  const optimisticCompletion = partyState.playback.optimisticCompletion;
+  let optimisticRemovedItem = null;
+  if (optimisticCompletion) {
+    const optimisticTransitionConfirmed =
+      isEasyJamPlayback && track.uri === optimisticCompletion.expectedNextUri;
+    if (optimisticTransitionConfirmed) {
+      try {
+        optimisticRemovedItem = removeItem(optimisticCompletion.itemId);
+      } catch (error) {
+        if (error.status !== 404) throw error;
+      }
+    }
+    partyState.playback.optimisticCompletion = null;
+  }
   const currentQueueItem = isEasyJamPlayback
     ? getCombinedQueue().find((item) => item.track.id === track.id)
     : null;
   const previousItemId = partyState.playback.currentItemId;
-  let removedItem = null;
+  let removedItem = optimisticRemovedItem;
 
   if (previousItemId && previousItemId !== currentQueueItem?.id) {
     try {
-      removedItem = removeItem(previousItemId);
+      const previousRemovedItem = removeItem(previousItemId);
+      removedItem ??= previousRemovedItem;
     } catch (error) {
       if (error.status !== 404) throw error;
     }

@@ -6,7 +6,8 @@ import {
   saveAutoStartPlayback,
   saveSpotifyPlaylistId,
   saveSpotifySetup,
-  setHandoffLeadMs
+  setHandoffLeadMs,
+  setPlaybackControlMode
 } from './config.js';
 import {
   addPinnedPlaylist,
@@ -17,6 +18,7 @@ import {
   getGuests,
   getGuestQueue,
   getGuestStats,
+  getVisibleQueue,
   getRequestStats,
   getRequesterStats,
   resetRequesterStats,
@@ -49,23 +51,31 @@ import {
 } from './state.js';
 import {
   bootstrapHostPlaylist,
+  cancelEasyJamPlaybackHandoff,
   cancelScheduledSpotifySync,
   createAuthorizationUrl,
   clearSpotifyRequestLog,
+  exportSpotifyRequestLogText,
   exchangeCodeForTokens,
+  getCachedCurrentPlayback,
   getCurrentPlayback,
   getCurrentPlaybackAfterReconnect,
+  getAvailableSpotifyDevices,
   getSpotifyRequestLog,
   getPlaylist,
   getPlaylistTracks,
   getRecommendations,
+  pauseSpotifyPlayback,
   protectCurrentPlayback,
   refreshPinnedPlaylists,
   resumeEasyJamPlayback,
   reschedulePendingHandoff,
   scheduleSpotifySync,
   searchTracks,
+  seekSpotifyPlayback,
+  skipSpotifyTrack,
   SpotifyError,
+  switchSpotifyPlaybackDevice,
   syncSpotifyPlaylist
 } from './spotify.js';
 import {
@@ -73,6 +83,7 @@ import {
   getPlayedTrackLog,
   saveGuestPlaylists,
   saveAutoStartPlaybackState,
+  savePlaybackControlModeState,
   saveHandoffLeadState,
   saveHostPlaylistState,
   saveInviteState,
@@ -109,7 +120,8 @@ function rateLimitedPlaybackResponse(now) {
   };
 }
 
-const PLAYBACK_CACHE_MS = 10_000;
+const EXTERNAL_PLAYBACK_CACHE_MS = 10_000;
+const EASYJAM_PLAYBACK_CACHE_MS = 60_000;
 const LIVE_PARTY_ACTIVITY_PERSIST_MS = 30_000;
 let lastLivePartyActivityPersistedAt = 0;
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60_000;
@@ -120,6 +132,12 @@ const MAX_ADMIN_ACCESS_ATTEMPTS = 8;
 const MAX_INVITE_PIN_ATTEMPTS = 10;
 const adminAccessSessions = new Map();
 const failedAttempts = new Map();
+
+function playbackCacheMs() {
+  return config.playbackControlMode === 'easyjam'
+    ? EASYJAM_PLAYBACK_CACHE_MS
+    : EXTERNAL_PLAYBACK_CACHE_MS;
+}
 
 function asyncHandler(handler) {
   return (req, res, next) => {
@@ -132,6 +150,15 @@ function requireAdmin(req, _res, next) {
   if (!partyState.host.adminToken || token !== partyState.host.adminToken) {
     const error = new Error('Admin token is required');
     error.status = 401;
+    throw error;
+  }
+  next();
+}
+
+function requireEasyJamEnabled(_req, _res, next) {
+  if (!config.easyJamEnabled) {
+    const error = new Error('Enable EasyJAM in the admin panel first');
+    error.status = 409;
     throw error;
   }
   next();
@@ -270,6 +297,16 @@ function hostStatus() {
     playlistPublic: partyState.host.playlistPublic,
     playlistCollaborative: partyState.host.playlistCollaborative,
     autoStartPlayback: config.autoStartPlayback,
+    easyJamEnabled: config.easyJamEnabled,
+    playbackDevice: partyState.host.playbackDevice
+      ? {
+          id: partyState.host.playbackDevice.id,
+          name: partyState.host.playbackDevice.name,
+          type: partyState.host.playbackDevice.type,
+          isActive: partyState.host.playbackDevice.isActive
+        }
+      : null,
+    playbackControlMode: config.playbackControlMode,
     handoffLeadMs: config.handoffLeadMs,
     spotifyConfigured: hasSpotifyCredentials(),
     spotifyRedirectUri: config.spotifyRedirectUri,
@@ -460,6 +497,10 @@ router.get(
       redirectUrl.searchParams.set('adminToken', partyState.host.adminToken);
 
       try {
+        if (!config.easyJamEnabled) {
+          res.redirect(redirectUrl.toString());
+          return;
+        }
         await bootstrapHostPlaylist();
         await saveHostPlaylistState();
         const currentPlayback = await getCurrentPlaybackAfterReconnect();
@@ -505,7 +546,7 @@ router.get('/session', (req, res) => {
     pinnedPlaylists: partyState.pinnedPlaylists.filter(
       (playlist) => playlist.visibleToGuests !== false
     ),
-    queue: getCombinedQueue().map(serializeQueueItem),
+    queue: getVisibleQueue().map(serializeQueueItem),
     guestStats: getGuestStats(),
     requestStats: getRequestStats(),
     requesterStats: getRequesterStats(),
@@ -537,7 +578,7 @@ router.post(
 router.get('/admin/status', requireAdmin, (req, res) => {
   res.json({
     host: hostStatus(),
-    queue: getCombinedQueue().map(serializeQueueItem),
+    queue: getVisibleQueue().map(serializeQueueItem),
     guestStats: getGuestStats(),
     guests: getGuests(),
     bannedGuests: getBannedGuests(),
@@ -552,6 +593,14 @@ router.get('/admin/status', requireAdmin, (req, res) => {
 
 router.get('/admin/spotify/request-log', requireAdmin, (_req, res) => {
   res.json(getSpotifyRequestLog());
+});
+
+router.get('/admin/spotify/request-log/export', requireAdmin, (_req, res) => {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  res
+    .type('text/plain')
+    .attachment(`easyjam-spotify-diagnostics-${timestamp}.txt`)
+    .send(exportSpotifyRequestLogText());
 });
 
 router.delete('/admin/spotify/request-log', requireAdmin, (_req, res) => {
@@ -626,6 +675,72 @@ router.post('/admin/auto-playback', requireAdmin, asyncHandler(async (req, res) 
   res.json({ autoStartPlayback, spotifySync, sync: partyState.sync });
 }));
 
+router.get('/admin/playback/devices', requireAdmin, asyncHandler(async (_req, res) => {
+  res.json({ devices: await getAvailableSpotifyDevices() });
+}));
+
+router.post('/admin/playback/device', requireAdmin, requireEasyJamEnabled, asyncHandler(async (req, res) => {
+  const playbackDevice = await switchSpotifyPlaybackDevice(req.body?.deviceId);
+  res.json({ playbackDevice, host: hostStatus() });
+}));
+
+router.post('/admin/easyjam-enabled', requireAdmin, asyncHandler(async (req, res) => {
+  const enabled = Boolean(req.body?.enabled);
+  let spotifySync = null;
+  if (enabled) {
+    const devices = await getAvailableSpotifyDevices();
+    const device = devices.find((candidate) => candidate.id === req.body?.deviceId);
+    if (!device) {
+      const error = new Error('Choose an available Spotify Connect device before enabling EasyJAM');
+      error.status = 409;
+      throw error;
+    }
+
+    // Selecting a Spotify Connect target does not itself tell us what Spotify is
+    // currently playing. Read it once before enabling automatic control so an
+    // already-playing track is preserved rather than replaced from a stale or
+    // optimistic player snapshot. The following sync reuses this shared cache.
+    const currentPlayback = await getCurrentPlayback({
+      force: true,
+      reason: 'easyjam_enable_playback_check'
+    });
+    updatePlaybackCache(currentPlayback);
+    const shouldProtectCurrentPlayback = Boolean(currentPlayback?.isPlaying);
+    partyState.host.playbackDevice = device;
+    // A previous host setup may have protected a track while EasyJAM was off.
+    // Enabling starts a new, explicitly scheduled handoff instead.
+    partyState.sync.pendingHandoff = null;
+    partyState.sync.protectedPlaybackUri = null;
+    partyState.sync.noActivePlaybackSince = null;
+    config.easyJamEnabled = true;
+    spotifySync = await syncAfterMutation({
+      forceRestart: !shouldProtectCurrentPlayback,
+      restartIfPaused: true,
+      deferToCurrentTrack: true,
+      preserveExternalPlayback: true,
+      suppressPlaybackStart: shouldProtectCurrentPlayback
+    }, { immediate: true });
+    if (spotifySync?.error) {
+      config.easyJamEnabled = false;
+      partyState.host.playbackDevice = null;
+      cancelEasyJamPlaybackHandoff();
+    }
+  } else {
+    config.easyJamEnabled = false;
+    partyState.host.playbackDevice = null;
+    cancelScheduledSpotifySync();
+    cancelEasyJamPlaybackHandoff();
+  }
+  res.json({ easyJamEnabled: config.easyJamEnabled, spotifySync, host: hostStatus(), sync: partyState.sync });
+}));
+
+router.post('/admin/playback-control-mode', requireAdmin, asyncHandler(async (req, res) => {
+  const playbackControlMode = setPlaybackControlMode(req.body?.mode);
+  if (playbackControlMode !== 'easyjam') cancelEasyJamPlaybackHandoff();
+  await savePlaybackControlModeState();
+  res.json({ playbackControlMode, host: hostStatus(), sync: partyState.sync });
+}));
+
 router.post('/admin/handoff-lead', requireAdmin, asyncHandler(async (req, res) => {
   const handoffLeadMs = setHandoffLeadMs(req.body?.handoffLeadMs);
   await saveHandoffLeadState();
@@ -655,6 +770,11 @@ router.get(
   asyncHandler(async (_req, res) => {
     const now = Date.now();
 
+    if (!config.easyJamEnabled) {
+      res.json({ current: null, disabled: true });
+      return;
+    }
+
     if (!partyState.host.tokens?.accessToken) {
       res.json({ current: null });
       return;
@@ -665,13 +785,26 @@ router.get(
       return;
     }
 
-    if (playbackCache.fetchedAt && now - playbackCache.fetchedAt < PLAYBACK_CACHE_MS) {
+    const sharedPlayback = getCachedCurrentPlayback();
+    if (sharedPlayback.fetchedAt > playbackCache.fetchedAt) {
+      playbackCache.current = sharedPlayback.current;
+      playbackCache.fetchedAt = sharedPlayback.fetchedAt;
+      playbackCache.lastError = null;
+      res.json({
+        current: playbackCache.current,
+        cached: true,
+        optimistic: sharedPlayback.optimistic
+      });
+      return;
+    }
+
+    if (playbackCache.fetchedAt && now - playbackCache.fetchedAt < playbackCacheMs()) {
       res.json({ current: playbackCache.current, cached: true });
       return;
     }
 
     try {
-      playbackCache.current = await getCurrentPlayback();
+      playbackCache.current = await getCurrentPlayback({ reason: 'player_status_refresh' });
       let spotifySync = null;
       const playbackUpdate = recordPlayback(playbackCache.current);
       if (playbackCache.current?.track) {
@@ -994,19 +1127,39 @@ router.delete(
 router.post(
   '/admin/playback/start',
   requireAdmin,
+  requireEasyJamEnabled,
   asyncHandler(async (_req, res) => {
     await resumeEasyJamPlayback();
     res.json({ ok: true });
   })
 );
 
+router.post('/admin/playback/pause', requireAdmin, requireEasyJamEnabled, asyncHandler(async (_req, res) => {
+  await pauseSpotifyPlayback();
+  res.json({ ok: true });
+}));
+
+router.post('/admin/playback/skip', requireAdmin, requireEasyJamEnabled, asyncHandler(async (req, res) => {
+  await skipSpotifyTrack(req.body?.direction);
+  res.json({ ok: true });
+}));
+
+router.post('/admin/playback/seek', requireAdmin, requireEasyJamEnabled, asyncHandler(async (req, res) => {
+  await seekSpotifyPlayback(req.body?.positionMs);
+  res.json({ ok: true });
+}));
+
 router.post(
   '/admin/sync',
   requireAdmin,
+  requireEasyJamEnabled,
   asyncHandler(async (_req, res) => {
     cancelScheduledSpotifySync();
     res.json({
-      spotifySync: await syncSpotifyPlaylist({ verifyPlaylist: true }),
+      spotifySync: await syncSpotifyPlaylist({
+        verifyPlaylist: true,
+        manualHostPlaylistSync: true
+      }),
       sync: partyState.sync
     });
   })
